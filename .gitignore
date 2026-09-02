@@ -1,0 +1,41 @@
+# Vagrant
+.vagrant/
+
+# VirtualBox headless VM logs (dumped at the repo root on every boot)
+*-VBoxHeadless-*.log
+
+# Logs
+logs/*
+!logs/.gitkeep
+
+# Everything the VMs drop in the shared folder at runtime - notably
+# admin.conf (a live cluster-admin kubeconfig) and join-command.sh (a
+# live kubeadm join token). Never commit either. Built image tarballs
+# also land here and don't belong in git regardless of sensitivity.
+shared_folder/*
+!shared_folder/logs/
+shared_folder/logs/*
+!shared_folder/logs/.gitkeep
+
+# Personal notes that ended up in this folder, unrelated to the project -
+# not deleting them, just making sure they never get committed.
+/delete
+/tp
+
+# macOS
+.DS_Store
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/

@@ -1,0 +1,55 @@
+# PVC so trained IsolationForest models (backend/models/*.joblib in the
+# original docker-compose bind mount) survive pod restarts instead of
+# retraining from scratch every time.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: worker-models-pvc
+  namespace: observability-platform
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 200Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: observability-platform
+spec:
+  replicas: 1 # app/worker.py is a single-process poll loop, not designed to scale out
+  strategy:
+    type: Recreate # single ReadWriteOnce volume - never run two pods at once
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: 192.168.56.20:5000/observability-backend:v2
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app.worker"]
+          envFrom:
+            - configMapRef: { name: obs-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: obs-db-secret, key: DATABASE_URL }
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+          volumeMounts:
+            - name: models
+              mountPath: /app/models
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 384Mi }
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: worker-models-pvc

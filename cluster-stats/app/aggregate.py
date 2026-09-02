@@ -1,0 +1,319 @@
+"""Turns raw Kubernetes API objects into the summaries the API/UI serve.
+
+Kept as plain functions over dicts (not a full client SDK's typed models)
+- the raw API JSON is exactly what we get from k8s_client, and every
+  summary here is a pure function of it, easy to unit test in isolation.
+"""
+from __future__ import annotations
+
+_MEM_UNITS = {
+    # Binary (IEC) suffixes, most common in practice.
+    "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5, "Ei": 1024**6,
+    # Decimal (SI) suffixes.
+    "k": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4, "P": 1000**5, "E": 1000**6,
+}
+
+
+def parse_cpu_millicores(value: str | None) -> float:
+    """'100m' -> 100.0, '1' -> 1000.0, '1.5' -> 1500.0, '500000n' -> 0.5"""
+    if not value:
+        return 0.0
+    if value.endswith("n"):
+        return float(value[:-1]) / 1_000_000
+    if value.endswith("u"):
+        return float(value[:-1]) / 1_000
+    if value.endswith("m"):
+        return float(value[:-1])
+    return float(value) * 1000
+
+
+def parse_memory_bytes(value: str | None) -> int:
+    """'128Mi' -> 134217728, '1Gi' -> 1073741824, '500' -> 500"""
+    if not value:
+        return 0
+    for suffix in sorted(_MEM_UNITS, key=len, reverse=True):
+        if value.endswith(suffix):
+            return int(float(value[: -len(suffix)]) * _MEM_UNITS[suffix])
+    return int(float(value))
+
+
+def _node_roles(node: dict) -> list[str]:
+    labels = node["metadata"].get("labels", {})
+    roles = [k.split("/", 1)[1] for k in labels if k.startswith("node-role.kubernetes.io/")]
+    return roles or ["<none>"]
+
+
+def _count_by(items: list, keyfn) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for item in items:
+        k = keyfn(item)
+        out[k] = out.get(k, 0) + 1
+    return out
+
+
+def _container_resources(containers: list[dict]) -> dict:
+    cpu_req = mem_req = cpu_lim = mem_lim = 0.0
+    for c in containers:
+        res = c.get("resources", {})
+        reqs, lims = res.get("requests", {}), res.get("limits", {})
+        cpu_req += parse_cpu_millicores(reqs.get("cpu"))
+        mem_req += parse_memory_bytes(reqs.get("memory"))
+        cpu_lim += parse_cpu_millicores(lims.get("cpu"))
+        mem_lim += parse_memory_bytes(lims.get("memory"))
+    return {
+        "cpu_requested_millicores": cpu_req,
+        "memory_requested_bytes": int(mem_req),
+        "cpu_limit_millicores": cpu_lim,
+        "memory_limit_bytes": int(mem_lim),
+    }
+
+
+def _metrics_usage_by_key(pod_metrics: list[dict]) -> dict[tuple[str, str], tuple[float, int]]:
+    usage = {}
+    for pm in pod_metrics:
+        key = (pm["metadata"]["namespace"], pm["metadata"]["name"])
+        cpu = sum(parse_cpu_millicores(c["usage"].get("cpu")) for c in pm.get("containers", []))
+        mem = sum(parse_memory_bytes(c["usage"].get("memory")) for c in pm.get("containers", []))
+        usage[key] = (cpu, int(mem))
+    return usage
+
+
+def summarize_nodes(nodes: list[dict], node_metrics: list[dict]) -> list[dict]:
+    metrics_by_name = {m["metadata"]["name"]: m for m in node_metrics}
+    result = []
+    for n in nodes:
+        name = n["metadata"]["name"]
+        capacity, allocatable = n["status"]["capacity"], n["status"]["allocatable"]
+        conditions = {c["type"]: c["status"] for c in n["status"].get("conditions", [])}
+        usage = metrics_by_name.get(name, {}).get("usage", {})
+
+        cpu_alloc = parse_cpu_millicores(allocatable.get("cpu"))
+        mem_alloc = parse_memory_bytes(allocatable.get("memory"))
+        cpu_used = parse_cpu_millicores(usage.get("cpu"))
+        mem_used = parse_memory_bytes(usage.get("memory"))
+        info = n["status"]["nodeInfo"]
+
+        result.append({
+            "name": name,
+            "ready": conditions.get("Ready") == "True",
+            "roles": _node_roles(n),
+            "internal_ip": next(
+                (a["address"] for a in n["status"].get("addresses", []) if a["type"] == "InternalIP"),
+                None,
+            ),
+            "cpu_capacity_millicores": parse_cpu_millicores(capacity.get("cpu")),
+            "cpu_allocatable_millicores": cpu_alloc,
+            "cpu_used_millicores": cpu_used,
+            "cpu_used_pct": round(cpu_used / cpu_alloc * 100, 1) if cpu_alloc else None,
+            "memory_capacity_bytes": parse_memory_bytes(capacity.get("memory")),
+            "memory_allocatable_bytes": mem_alloc,
+            "memory_used_bytes": mem_used,
+            "memory_used_pct": round(mem_used / mem_alloc * 100, 1) if mem_alloc else None,
+            "pod_capacity": int(allocatable.get("pods", 0)),
+            "kubelet_version": info["kubeletVersion"],
+            "os_image": info["osImage"],
+            "container_runtime": info["containerRuntimeVersion"],
+        })
+    return result
+
+
+def _count_by_namespace(items: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        ns = item["metadata"]["namespace"]
+        counts[ns] = counts.get(ns, 0) + 1
+    return counts
+
+
+def summarize_namespaces(
+    namespaces: list[dict],
+    pods: list[dict],
+    pod_metrics: list[dict],
+    resource_kinds: dict[str, list[dict]] | None = None,
+) -> list[dict]:
+    """resource_kinds: {display name -> objects} for whatever else should
+    be counted per namespace (Service, ConfigMap, Job, ...). Extensible
+    without touching this function again - just pass another entry."""
+    usage_by_key = _metrics_usage_by_key(pod_metrics)
+    resource_kinds = resource_kinds or {}
+    counts_by_kind = {kind: _count_by_namespace(items) for kind, items in resource_kinds.items()}
+
+    by_ns = {
+        ns["metadata"]["name"]: {
+            "name": ns["metadata"]["name"],
+            "status": ns["status"]["phase"],
+            "pod_count": 0,
+            "pods_by_phase": {},
+            "cpu_requested_millicores": 0.0,
+            "memory_requested_bytes": 0,
+            "cpu_limit_millicores": 0.0,
+            "memory_limit_bytes": 0,
+            "cpu_used_millicores": 0.0,
+            "memory_used_bytes": 0,
+            "resource_counts": {
+                kind: counts.get(ns["metadata"]["name"], 0) for kind, counts in counts_by_kind.items()
+            },
+        }
+        for ns in namespaces
+    }
+
+    for p in pods:
+        ns_name = p["metadata"]["namespace"]
+        entry = by_ns.get(ns_name)
+        if entry is None:
+            continue
+        entry["pod_count"] += 1
+        phase = p["status"].get("phase", "Unknown")
+        entry["pods_by_phase"][phase] = entry["pods_by_phase"].get(phase, 0) + 1
+
+        res = _container_resources(p["spec"].get("containers", []))
+        entry["cpu_requested_millicores"] += res["cpu_requested_millicores"]
+        entry["memory_requested_bytes"] += res["memory_requested_bytes"]
+        entry["cpu_limit_millicores"] += res["cpu_limit_millicores"]
+        entry["memory_limit_bytes"] += res["memory_limit_bytes"]
+
+        cpu_u, mem_u = usage_by_key.get((ns_name, p["metadata"]["name"]), (0.0, 0))
+        entry["cpu_used_millicores"] += cpu_u
+        entry["memory_used_bytes"] += mem_u
+
+    return sorted(by_ns.values(), key=lambda e: e["name"])
+
+
+def summarize_pods(pods: list[dict], pod_metrics: list[dict]) -> list[dict]:
+    usage_by_key = _metrics_usage_by_key(pod_metrics)
+    result = []
+    for p in pods:
+        ns, name = p["metadata"]["namespace"], p["metadata"]["name"]
+        res = _container_resources(p["spec"].get("containers", []))
+        restarts = sum(cs.get("restartCount", 0) for cs in p["status"].get("containerStatuses", []))
+        cpu_u, mem_u = usage_by_key.get((ns, name), (0.0, 0))
+        result.append({
+            "namespace": ns,
+            "name": name,
+            "node": p["spec"].get("nodeName"),
+            "phase": p["status"].get("phase"),
+            "restarts": restarts,
+            "cpu_used_millicores": cpu_u,
+            "memory_used_bytes": mem_u,
+            **res,
+        })
+    return result
+
+
+def _hpa_metric_summary(m: dict) -> dict:
+    if m["type"] == "Resource":
+        r = m["resource"]
+        return {"type": "Resource", "name": r["name"], "target": r.get("target", {})}
+    return {"type": m["type"]}
+
+
+def _workload_entry(kind: str, obj: dict, desired: int, current: int, ready: int) -> dict:
+    return {
+        "kind": kind,
+        "namespace": obj["metadata"]["namespace"],
+        "name": obj["metadata"]["name"],
+        "desired": desired,
+        "current": current,
+        "ready": ready,
+    }
+
+
+def summarize_workloads(deployments: list[dict], daemonsets: list[dict], statefulsets: list[dict]) -> list[dict]:
+    """Deployments, DaemonSets, and StatefulSets in one normalized list -
+    the three controller kinds that actually own pods with a resizable
+    PodTemplateSpec (and so are the kinds ensure_vpas_for_workloads
+    creates VPA recommendations for)."""
+    result = []
+    for d in deployments:
+        spec, status = d["spec"], d.get("status", {})
+        result.append(_workload_entry(
+            "Deployment", d,
+            desired=spec.get("replicas", 0),
+            current=status.get("replicas", 0),
+            ready=status.get("readyReplicas", 0),
+        ))
+    for ds in daemonsets:
+        status = ds.get("status", {})
+        result.append(_workload_entry(
+            "DaemonSet", ds,
+            desired=status.get("desiredNumberScheduled", 0),
+            current=status.get("currentNumberScheduled", 0),
+            ready=status.get("numberReady", 0),
+        ))
+    for ss in statefulsets:
+        spec, status = ss["spec"], ss.get("status", {})
+        result.append(_workload_entry(
+            "StatefulSet", ss,
+            desired=spec.get("replicas", 0),
+            current=status.get("replicas", 0),
+            ready=status.get("readyReplicas", 0),
+        ))
+    return sorted(result, key=lambda w: (w["namespace"], w["kind"], w["name"]))
+
+
+def summarize_hpas(hpas: list[dict]) -> list[dict]:
+    result = []
+    for h in hpas:
+        spec, status = h["spec"], h.get("status", {})
+        result.append({
+            "namespace": h["metadata"]["namespace"],
+            "name": h["metadata"]["name"],
+            "target_kind": spec["scaleTargetRef"]["kind"],
+            "target_name": spec["scaleTargetRef"]["name"],
+            "min_replicas": spec.get("minReplicas"),
+            "max_replicas": spec.get("maxReplicas"),
+            "current_replicas": status.get("currentReplicas"),
+            "desired_replicas": status.get("desiredReplicas"),
+            "metrics": [_hpa_metric_summary(m) for m in spec.get("metrics", [])],
+        })
+    return result
+
+
+def _vpa_bound(bound: dict | None) -> dict | None:
+    if not bound:
+        return None
+    return {
+        "cpu_millicores": parse_cpu_millicores(bound.get("cpu")),
+        "memory_bytes": parse_memory_bytes(bound.get("memory")),
+    }
+
+
+def summarize_vpas(vpas: list[dict]) -> list[dict]:
+    result = []
+    for v in vpas:
+        spec, status = v["spec"], v.get("status", {})
+        recs = status.get("recommendation", {}).get("containerRecommendations", []) or []
+        result.append({
+            "namespace": v["metadata"]["namespace"],
+            "name": v["metadata"]["name"],
+            "target_kind": spec["targetRef"]["kind"],
+            "target_name": spec["targetRef"]["name"],
+            "update_mode": spec.get("updatePolicy", {}).get("updateMode", "Off"),
+            "auto_created": v["metadata"].get("labels", {}).get("app.kubernetes.io/managed-by") == "cluster-stats",
+            "containers": [
+                {
+                    "container_name": c["containerName"],
+                    "target": _vpa_bound(c.get("target")),
+                    "lower_bound": _vpa_bound(c.get("lowerBound")),
+                    "upper_bound": _vpa_bound(c.get("upperBound")),
+                }
+                for c in recs
+            ],
+        })
+    return result
+
+
+def summarize_cluster(nodes_summary: list[dict], ns_summary: list[dict], pods: list[dict]) -> dict:
+    return {
+        "node_count": len(nodes_summary),
+        "nodes_ready": sum(1 for n in nodes_summary if n["ready"]),
+        "namespace_count": len(ns_summary),
+        "pod_count": len(pods),
+        "pods_by_phase": _count_by(pods, lambda p: p["status"].get("phase", "Unknown")),
+        "cpu_capacity_millicores": sum(n["cpu_capacity_millicores"] for n in nodes_summary),
+        "cpu_allocatable_millicores": sum(n["cpu_allocatable_millicores"] for n in nodes_summary),
+        "cpu_used_millicores": sum(n["cpu_used_millicores"] for n in nodes_summary),
+        "memory_capacity_bytes": sum(n["memory_capacity_bytes"] for n in nodes_summary),
+        "memory_allocatable_bytes": sum(n["memory_allocatable_bytes"] for n in nodes_summary),
+        "memory_used_bytes": sum(n["memory_used_bytes"] for n in nodes_summary),
+    }

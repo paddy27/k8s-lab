@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cluster-stats</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2e38; --text: #e6e8ec;
+    --muted: #8b93a3; --accent: #4f8cff; --good: #3ecf8e; --warn: #f5a623; --bad: #f0554d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 12px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+  section { margin-bottom: 32px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0 0 12px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .card .value { font-size: 24px; font-weight: 600; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:last-child td { border-bottom: none; }
+  .bar { display: inline-block; width: 60px; height: 6px; background: #2a2e38; border-radius: 3px; overflow: hidden; vertical-align: middle; margin-right: 6px; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  .bar.warn > span { background: var(--warn); }
+  .bar.bad > span { background: var(--bad); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .pill.good { background: rgba(62,207,142,0.15); color: var(--good); }
+  .pill.bad { background: rgba(240,85,77,0.15); color: var(--bad); }
+  .pill.neutral { background: rgba(139,147,163,0.15); color: var(--muted); }
+  .muted { color: var(--muted); }
+  .tablewrap { overflow-x: auto; }
+  .empty { color: var(--muted); font-style: italic; padding: 12px; }
+  #status { color: var(--muted); font-size: 12px; }
+  .filterbar { display: flex; align-items: center; gap: 16px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
+  .filterbar label { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .filterbar select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+  .filterbar input[type=checkbox] { accent-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>cluster-stats</h1>
+  <span class="sub">k8s-lab</span>
+  <span id="status" style="margin-left:auto"></span>
+</header>
+<div class="filterbar">
+  <label>Namespace
+    <select id="namespace-filter">
+      <option value="">All namespaces</option>
+    </select>
+  </label>
+  <label>
+    <input type="checkbox" id="vpa-data-filter">
+    Only VPA rows with recommendation data
+  </label>
+</div>
+<main>
+  <section>
+    <h2>Cluster</h2>
+    <div class="cards" id="cluster-cards"></div>
+  </section>
+
+  <section>
+    <h2>Nodes</h2>
+    <div class="tablewrap"><table id="nodes-table"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <section>
+    <h2>Namespaces</h2>
+    <div class="tablewrap"><table id="namespaces-table"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <section>
+    <h2>Workloads (Deployments, DaemonSets, StatefulSets)</h2>
+    <div class="tablewrap"><table id="workloads-table"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <section>
+    <h2>HPA (Horizontal Pod Autoscalers)</h2>
+    <div class="tablewrap" id="hpa-wrap"></div>
+  </section>
+
+  <section>
+    <h2>VPA Recommendations</h2>
+    <div class="tablewrap" id="vpa-wrap"></div>
+  </section>
+
+  <section>
+    <h2>Pods</h2>
+    <div class="tablewrap"><table id="pods-table"><thead></thead><tbody></tbody></table></div>
+  </section>
+</main>
+
+<script>
+const REFRESH_MS = 15000;
+
+function fmtBytes(b) {
+  if (b === null || b === undefined) return "-";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0, v = b;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+}
+function fmtCpu(m) {
+  if (m === null || m === undefined) return "-";
+  return m >= 1000 ? `${(m / 1000).toFixed(2)} cores` : `${m.toFixed(0)}m`;
+}
+function pctBarClass(pct) {
+  if (pct === null || pct === undefined) return "";
+  if (pct >= 90) return "bad";
+  if (pct >= 75) return "warn";
+  return "";
+}
+function bar(pct) {
+  if (pct === null || pct === undefined) return "-";
+  const cls = pctBarClass(pct);
+  return `<span class="bar ${cls}"><span style="width:${Math.min(pct, 100)}%"></span></span>${pct}%`;
+}
+function pill(text, kind) {
+  return `<span class="pill ${kind}">${text}</span>`;
+}
+
+async function getJSON(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  return res.json();
+}
+
+const filters = { namespace: "", onlyVpaWithData: false };
+
+function withQuery(path, params) {
+  const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== "" && v !== false));
+  const s = qs.toString();
+  return s ? `${path}?${s}` : path;
+}
+
+function renderCards(c) {
+  const cards = [
+    { label: "Nodes Ready", value: `${c.nodes_ready}/${c.node_count}` },
+    { label: "Namespaces", value: c.namespace_count },
+    { label: "Pods", value: c.pod_count, sub: Object.entries(c.pods_by_phase).map(([k,v]) => `${k}: ${v}`).join(", ") },
+    { label: "CPU Used", value: fmtCpu(c.cpu_used_millicores), sub: `of ${fmtCpu(c.cpu_allocatable_millicores)} allocatable` },
+    { label: "Memory Used", value: fmtBytes(c.memory_used_bytes), sub: `of ${fmtBytes(c.memory_allocatable_bytes)} allocatable` },
+  ];
+  const wrap = document.getElementById("cluster-cards");
+  wrap.innerHTML = cards.map(c => `<div class="card"><div class="label">${c.label}</div><div class="value">${c.value}</div>${c.sub ? `<div class="sub">${c.sub}</div>` : ""}</div>`).join("");
+}
+
+function renderTable(tableId, columns, rows) {
+  const table = document.getElementById(tableId);
+  table.querySelector("thead").innerHTML = `<tr>${columns.map(c => `<th>${c.label}</th>`).join("")}</tr>`;
+  const tbody = table.querySelector("tbody");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="${columns.length}" class="empty">none</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `<tr>${columns.map(c => `<td>${c.render(r)}</td>`).join("")}</tr>`).join("");
+}
+
+async function refreshNodes() {
+  const nodes = await getJSON("/api/nodes");
+  renderTable("nodes-table", [
+    { label: "Name", render: n => n.name },
+    { label: "Ready", render: n => n.ready ? pill("Ready", "good") : pill("NotReady", "bad") },
+    { label: "Roles", render: n => n.roles.join(", ") },
+    { label: "Internal IP", render: n => n.internal_ip || "-" },
+    { label: "CPU", render: n => bar(n.cpu_used_pct) + ` (${fmtCpu(n.cpu_used_millicores)} / ${fmtCpu(n.cpu_allocatable_millicores)})` },
+    { label: "Memory", render: n => bar(n.memory_used_pct) + ` (${fmtBytes(n.memory_used_bytes)} / ${fmtBytes(n.memory_allocatable_bytes)})` },
+    { label: "Pod capacity", render: n => n.pod_capacity },
+    { label: "Runtime", render: n => n.container_runtime },
+    { label: "Kubelet", render: n => n.kubelet_version },
+  ], nodes);
+}
+
+function syncNamespaceOptions(namespaceNames) {
+  const select = document.getElementById("namespace-filter");
+  const current = select.value;
+  const existing = new Set([...select.options].map(o => o.value));
+  const wanted = new Set(["", ...namespaceNames]);
+  if (existing.size === wanted.size && [...existing].every(v => wanted.has(v))) return; // no change, keep the user's focus/selection undisturbed
+  select.innerHTML = `<option value="">All namespaces</option>` + namespaceNames.map(n => `<option value="${n}">${n}</option>`).join("");
+  if (wanted.has(current)) select.value = current;
+}
+
+async function refreshNamespaces() {
+  const ns = await getJSON("/api/namespaces");
+  syncNamespaceOptions(ns.map(n => n.name));
+  renderTable("namespaces-table", [
+    { label: "Namespace", render: n => n.name },
+    { label: "Pods", render: n => `${n.pod_count} (${Object.entries(n.pods_by_phase).map(([k,v]) => `${k}: ${v}`).join(", ") || "-"})` },
+    { label: "Resources", render: n => Object.entries(n.resource_counts).filter(([,v]) => v > 0).map(([k,v]) => `${k}: ${v}`).join(", ") || "-" },
+    { label: "CPU requested", render: n => fmtCpu(n.cpu_requested_millicores) },
+    { label: "CPU limit", render: n => fmtCpu(n.cpu_limit_millicores) },
+    { label: "CPU used", render: n => fmtCpu(n.cpu_used_millicores) },
+    { label: "Mem requested", render: n => fmtBytes(n.memory_requested_bytes) },
+    { label: "Mem limit", render: n => fmtBytes(n.memory_limit_bytes) },
+    { label: "Mem used", render: n => fmtBytes(n.memory_used_bytes) },
+  ], ns);
+}
+
+async function refreshWorkloads() {
+  const workloads = await getJSON(withQuery("/api/workloads", { namespace: filters.namespace }));
+  renderTable("workloads-table", [
+    { label: "Namespace", render: w => w.namespace },
+    { label: "Kind", render: w => w.kind },
+    { label: "Name", render: w => w.name },
+    { label: "Desired", render: w => w.desired },
+    { label: "Current", render: w => w.current },
+    { label: "Ready", render: w => w.ready === w.desired ? pill(w.ready, "good") : pill(w.ready, "warn") },
+  ], workloads);
+}
+
+async function refreshPods() {
+  const pods = await getJSON(withQuery("/api/pods", { namespace: filters.namespace }));
+  renderTable("pods-table", [
+    { label: "Namespace", render: p => p.namespace },
+    { label: "Pod", render: p => p.name },
+    { label: "Node", render: p => p.node || "-" },
+    { label: "Phase", render: p => pill(p.phase, p.phase === "Running" ? "good" : p.phase === "Failed" ? "bad" : "neutral") },
+    { label: "Restarts", render: p => p.restarts > 0 ? pill(p.restarts, "warn") : p.restarts },
+    { label: "CPU req/lim/used", render: p => `${fmtCpu(p.cpu_requested_millicores)} / ${fmtCpu(p.cpu_limit_millicores)} / ${fmtCpu(p.cpu_used_millicores)}` },
+    { label: "Mem req/lim/used", render: p => `${fmtBytes(p.memory_requested_bytes)} / ${fmtBytes(p.memory_limit_bytes)} / ${fmtBytes(p.memory_used_bytes)}` },
+  ], pods);
+}
+
+async function refreshHpa() {
+  const hpas = await getJSON(withQuery("/api/autoscaling/hpa", { namespace: filters.namespace }));
+  const wrap = document.getElementById("hpa-wrap");
+  if (!hpas.length) { wrap.innerHTML = `<div class="empty">No HorizontalPodAutoscalers in the cluster yet.</div>`; return; }
+  const table = document.createElement("table");
+  table.innerHTML = `<thead></thead><tbody></tbody>`;
+  wrap.innerHTML = "";
+  wrap.appendChild(table);
+  renderTable(table.id = "hpa-live-table", [
+    { label: "Namespace", render: h => h.namespace },
+    { label: "Name", render: h => h.name },
+    { label: "Target", render: h => `${h.target_kind}/${h.target_name}` },
+    { label: "Min", render: h => h.min_replicas },
+    { label: "Max", render: h => h.max_replicas },
+    { label: "Current", render: h => h.current_replicas ?? "-" },
+    { label: "Desired", render: h => h.desired_replicas ?? "-" },
+    { label: "Metrics", render: h => h.metrics.map(m => m.type === "Resource" ? `${m.name}: ${m.target.averageUtilization ?? m.target.averageValue ?? "-"}${m.target.averageUtilization ? "%" : ""}` : m.type).join(", ") || "-" },
+  ], hpas);
+}
+
+async function refreshVpa() {
+  const vpas = await getJSON(withQuery("/api/autoscaling/vpa", { namespace: filters.namespace, only_with_data: filters.onlyVpaWithData }));
+  const wrap = document.getElementById("vpa-wrap");
+  if (!vpas.length) {
+    wrap.innerHTML = filters.onlyVpaWithData
+      ? `<div class="empty">No VPA rows have recommendation data yet - the recommender needs a few minutes of observed usage before it produces one. Try unchecking the filter above to see pending ones.</div>`
+      : `<div class="empty">No recommendations yet - the VPA recommender needs a few minutes of observed usage before it produces one.</div>`;
+    return;
+  }
+  const rows = [];
+  for (const v of vpas) {
+    if (!v.containers.length) {
+      rows.push({ ...v, container_name: "-", target: null, lower_bound: null, upper_bound: null });
+    }
+    for (const c of v.containers) rows.push({ ...v, ...c });
+  }
+  wrap.innerHTML = "";
+  const table = document.createElement("table");
+  table.innerHTML = `<thead></thead><tbody></tbody>`;
+  wrap.appendChild(table);
+  renderTable(table.id = "vpa-live-table", [
+    { label: "Namespace", render: r => r.namespace },
+    { label: "Target", render: r => `${r.target_kind}/${r.target_name}` },
+    { label: "Container", render: r => r.container_name },
+    { label: "Auto-created", render: r => r.auto_created ? pill("auto", "neutral") : pill("manual", "good") },
+    { label: "Recommended CPU (min-max)", render: r => r.lower_bound && r.upper_bound ? `${fmtCpu(r.lower_bound.cpu_millicores)} - ${fmtCpu(r.upper_bound.cpu_millicores)}` : "-" },
+    { label: "Recommended Mem (min-max)", render: r => r.lower_bound && r.upper_bound ? `${fmtBytes(r.lower_bound.memory_bytes)} - ${fmtBytes(r.upper_bound.memory_bytes)}` : "-" },
+    { label: "Target CPU", render: r => r.target ? fmtCpu(r.target.cpu_millicores) : "-" },
+    { label: "Target Mem", render: r => r.target ? fmtBytes(r.target.memory_bytes) : "-" },
+  ], rows);
+}
+
+async function refreshAll() {
+  const status = document.getElementById("status");
+  try {
+    const cluster = await getJSON("/api/cluster/summary");
+    renderCards(cluster);
+    await Promise.all([refreshNodes(), refreshNamespaces(), refreshWorkloads(), refreshPods(), refreshHpa(), refreshVpa()]);
+    status.textContent = `updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    status.textContent = `error: ${e.message}`;
+  }
+}
+
+document.getElementById("namespace-filter").addEventListener("change", e => {
+  filters.namespace = e.target.value;
+  refreshAll();
+});
+document.getElementById("vpa-data-filter").addEventListener("change", e => {
+  filters.onlyVpaWithData = e.target.checked;
+  refreshVpa();
+});
+
+refreshAll();
+setInterval(refreshAll, REFRESH_MS);
+</script>
+</body>
+</html>

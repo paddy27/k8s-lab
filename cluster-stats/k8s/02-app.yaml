@@ -1,0 +1,52 @@
+# Image built on buildserver and pushed to its registry, then
+# pre-pulled onto cluster nodes - see ../deploy.sh. imagePullPolicy
+# IfNotPresent because kubelet's own registry pull hits a known
+# containerd 2.2.1 bug on this box (see k8s-manifests/README.md in the
+# k8s-lab root for the full writeup).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-stats
+  namespace: cluster-stats
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-stats
+  template:
+    metadata:
+      labels:
+        app: cluster-stats
+    spec:
+      serviceAccountName: cluster-stats
+      containers:
+        - name: cluster-stats
+          image: 192.168.56.20:5000/cluster-stats:v3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-stats
+  namespace: cluster-stats
+spec:
+  selector:
+    app: cluster-stats
+  type: NodePort
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30090

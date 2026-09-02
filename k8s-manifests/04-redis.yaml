@@ -1,0 +1,43 @@
+# No PVC - matches docker-compose, which never gave redis a named volume
+# either. It's used purely as a "pending metric names" work queue; losing
+# it just means the next ingest re-marks names for the worker to pick up.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: observability-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: observability-platform
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379

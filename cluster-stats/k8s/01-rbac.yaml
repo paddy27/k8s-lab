@@ -1,0 +1,51 @@
+# Read-only cluster-wide access, plus the one write permission this app
+# actually needs: creating VerticalPodAutoscaler objects (always in
+# updateMode "Off" - see app/vpa_manager.py). No permission to modify,
+# delete, or scale anything else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-stats
+  namespace: cluster-stats
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-stats-reader
+rules:
+  # Deliberately NOT "secrets": RBAC grants the verb+resource, not a
+  # representation - a ServiceAccount with `list` on secrets can always
+  # read full secret data via a normal request, regardless of what
+  # content-type this app happens to ask for. Not worth that blast
+  # radius just to show a count. See app/k8s_client.py.
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "pods", "services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-stats-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-stats-reader
+subjects:
+  - kind: ServiceAccount
+    name: cluster-stats
+    namespace: cluster-stats

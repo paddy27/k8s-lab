@@ -1,0 +1,12 @@
+# Mirrors backend/.env.example - the non-secret worker/detector settings.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: obs-config
+  namespace: observability-platform
+data:
+  WORKER_INTERVAL_SECONDS: "10"
+  MODEL_DIR: "/app/models"
+  MIN_POINTS_TO_TRAIN: "50"
+  CONTAMINATION: "0.05"
+  POSTGRES_DB: "observability"
