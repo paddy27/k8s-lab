@@ -137,6 +137,22 @@ async def vpas(namespace: Optional[str] = None, only_with_data: bool = False):
     return result
 
 
+@app.get("/api/recommendations")
+async def recommendations(namespace: Optional[str] = None):
+    client = app.state.client
+    d, ds, ss, vpa_list, hpa_list = await asyncio.gather(
+        k8s_client.list_deployments(client),
+        k8s_client.list_daemonsets(client),
+        k8s_client.list_statefulsets(client),
+        k8s_client.list_vpas(client),
+        k8s_client.list_hpas(client),
+    )
+    result = aggregate.build_recommendations(d, ds, ss, vpa_list, hpa_list)
+    if namespace:
+        result = [r for r in result if r["namespace"] == namespace]
+    return result
+
+
 _STATIC_DIR = Path(__file__).parent / "static"
 
 

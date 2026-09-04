@@ -317,3 +317,123 @@ def summarize_cluster(nodes_summary: list[dict], ns_summary: list[dict], pods: l
         "memory_allocatable_bytes": sum(n["memory_allocatable_bytes"] for n in nodes_summary),
         "memory_used_bytes": sum(n["memory_used_bytes"] for n in nodes_summary),
     }
+
+
+def _fmt_bytes(b: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if b < 1024 or unit == "TiB":
+            return f"{b:.0f}{unit}" if unit == "B" else f"{b:.1f}{unit}"
+        b /= 1024
+    return f"{b:.1f}TiB"  # unreachable, keeps type-checkers happy
+
+
+def _template_container_requests(workload_obj: dict) -> dict[str, dict]:
+    """{container_name: {cpu_requested_millicores, memory_requested_bytes}}
+    straight from the workload's pod template - Deployment, DaemonSet,
+    and StatefulSet all share the same .spec.template.spec.containers
+    shape, which is what a VPA recommendation is actually judged
+    against (not any individual running pod)."""
+    containers = workload_obj.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+    result = {}
+    for c in containers:
+        reqs = c.get("resources", {}).get("requests", {})
+        result[c["name"]] = {
+            "cpu_requested_millicores": parse_cpu_millicores(reqs.get("cpu")),
+            "memory_requested_bytes": parse_memory_bytes(reqs.get("memory")),
+        }
+    return result
+
+
+def _sizing_recommendation(dimension: str, current: float, lower: float, upper: float, fmt) -> tuple[str, str] | None:
+    """Returns (message, severity) if the current request is outside the
+    VPA's [lower, upper] band, else None. 'severity' is "warning" for
+    under-provisioned (real risk: throttling/OOM) and "info" for
+    over-provisioned (waste, not a failure risk)."""
+    if current < lower:
+        if current == 0:
+            return f"No {dimension} request set - VPA recommends at least {fmt(lower)}.", "warning"
+        return (
+            f"{dimension} request ({fmt(current)}) is below the VPA-recommended minimum "
+            f"({fmt(lower)}) - risk of throttling/OOM under load.",
+            "warning",
+        )
+    if current > upper:
+        return (
+            f"{dimension} request ({fmt(current)}) is above the VPA-recommended maximum "
+            f"({fmt(upper)}) - likely over-provisioned.",
+            "info",
+        )
+    return None
+
+
+def build_recommendations(
+    deployments: list[dict],
+    daemonsets: list[dict],
+    statefulsets: list[dict],
+    vpas: list[dict],
+    hpas: list[dict],
+) -> list[dict]:
+    """The actual "recommendation engine" piece: turns raw VPA/HPA state
+    into actionable suggestions instead of just numbers in a table -
+    "this container's CPU request is below what the VPA recommends" /
+    "this HPA is pinned at max replicas" - each with a namespace/target
+    so the UI can link back to the relevant row."""
+    workloads_by_key = {
+        (obj["metadata"]["namespace"], kind, obj["metadata"]["name"]): obj
+        for kind, objs in (("Deployment", deployments), ("DaemonSet", daemonsets), ("StatefulSet", statefulsets))
+        for obj in objs
+    }
+
+    recommendations = []
+
+    for vpa in summarize_vpas(vpas):
+        workload_obj = workloads_by_key.get((vpa["namespace"], vpa["target_kind"], vpa["target_name"]))
+        if workload_obj is None:
+            continue
+        template_requests = _template_container_requests(workload_obj)
+        for c in vpa["containers"]:
+            current = template_requests.get(c["container_name"])
+            lower, upper = c.get("lower_bound"), c.get("upper_bound")
+            if current is None or lower is None or upper is None:
+                continue
+
+            for dimension, current_value, lower_value, upper_value, fmt in (
+                ("CPU", current["cpu_requested_millicores"], lower["cpu_millicores"], upper["cpu_millicores"], lambda m: f"{m:.0f}m"),
+                ("Memory", current["memory_requested_bytes"], lower["memory_bytes"], upper["memory_bytes"], _fmt_bytes),
+            ):
+                result = _sizing_recommendation(dimension, current_value, lower_value, upper_value, fmt)
+                if result is None:
+                    continue
+                message, severity = result
+                recommendations.append({
+                    "namespace": vpa["namespace"],
+                    "target_kind": vpa["target_kind"],
+                    "target_name": vpa["target_name"],
+                    "container": c["container_name"],
+                    "type": "VPA",
+                    "severity": severity,
+                    "message": message,
+                })
+
+    for hpa in summarize_hpas(hpas):
+        base = {
+            "namespace": hpa["namespace"],
+            "target_kind": hpa["target_kind"],
+            "target_name": hpa["target_name"],
+            "container": None,
+            "type": "HPA",
+        }
+        if hpa["current_replicas"] is not None and hpa["current_replicas"] >= hpa["max_replicas"]:
+            recommendations.append({
+                **base,
+                "severity": "warning",
+                "message": f"At max replicas ({hpa['max_replicas']}) - if load keeps growing, raise maxReplicas.",
+            })
+        if hpa["min_replicas"] == hpa["max_replicas"]:
+            recommendations.append({
+                **base,
+                "severity": "info",
+                "message": f"minReplicas == maxReplicas ({hpa['min_replicas']}) - this HPA can never actually scale.",
+            })
+
+    return recommendations

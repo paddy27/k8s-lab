@@ -13,9 +13,18 @@ echo "Provisioning $(hostname)"
 echo "Started : $(date)"
 echo "====================================="
 
-# Disable swap
+# Disable swap - kubelet refuses to start with swap on. swapoff+fstab
+# alone isn't enough on this box: the bento/ubuntu-22.04 image sets up
+# /swap.img via its own systemd unit (swap.img.swap), independent of
+# fstab, which re-activates it on every cold boot regardless of the
+# fstab edit below - confirmed the hard way after a VM crash/cold-reboot
+# left kubelet crash-looping with "running with swap on is not
+# supported". Masking the unit is what actually makes it stick.
 swapoff -a
 sed -i '/ swap / s/^/#/' /etc/fstab
+if systemctl list-unit-files 'swap.img.swap' --no-legend | grep -q swap.img.swap; then
+  systemctl mask swap.img.swap
+fi
 
 # Kernel modules
 cat <<EOF >/etc/modules-load.d/k8s.conf

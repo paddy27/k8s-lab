@@ -10,6 +10,10 @@ Talks to the Kubernetes API server directly (not Prometheus) via a
 scoped ServiceAccount, so it stays accurate even if the monitoring
 stack on the `monitoring` VM is down.
 
+`k8s/03-hpa.yaml` gives the app its own real HPA (CPU-based, 1-3
+replicas) - there were previously zero HPAs anywhere in the cluster,
+so this is what makes the HPA table/recommendations non-empty.
+
 ## Running it
 
 **In the cluster** (how it's actually deployed): see
@@ -51,10 +55,34 @@ functions - no cluster or mocking needed.
 | `GET /api/pods?namespace=` | full pod table: node, phase, restarts, requests/limits/usage |
 | `GET /api/autoscaling/hpa?namespace=` | HPA min/max/current/desired |
 | `GET /api/autoscaling/vpa?namespace=&only_with_data=` | VPA recommended CPU/mem (lowerBound/upperBound) per container |
+| `GET /api/recommendations?namespace=` | actionable suggestions derived from VPA + HPA state (see below) |
 
 `GET /` serves a single-page dashboard (`app/static/index.html`) over
 all of the above, auto-refreshing every 15s, with namespace and
 "only VPA rows with data" filters.
+
+## The recommendation engine
+
+`/api/recommendations` (`build_recommendations` in `app/aggregate.py`)
+is the point of collecting VPA/HPA data in the first place - not just
+displaying numbers, but turning them into "here's what's wrong and
+what to do about it":
+
+- **VPA-based**: for every container with a VPA recommendation, compares
+  it against that workload's *actual* pod-template resource request
+  (pulled straight from the Deployment/DaemonSet/StatefulSet object, not
+  a running pod - avoids fragile pod-to-owner matching entirely).
+  Flags three cases: no request set at all, request below the
+  recommended minimum (`warning` - real risk of throttling/OOMKill), or
+  above the recommended maximum (`info` - likely just wasted capacity).
+  Silent when a container is already well-sized.
+- **HPA-based**: flags an HPA pinned at `maxReplicas` (`warning` - could
+  be silently capping real demand) and one where `minReplicas ==
+  maxReplicas` (`info` - it's configured but structurally can never
+  scale).
+
+Every recommendation carries a namespace/kind/name/container so the UI
+can point back at exactly what triggered it.
 
 ## Design decisions worth knowing about
 

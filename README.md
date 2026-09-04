@@ -105,12 +105,29 @@ Deployment/DaemonSet/StatefulSet in the cluster on an ongoing basis -
 see [`cluster-stats/README.md`](cluster-stats/README.md) for why and
 how.
 
+## Known quirks fixed along the way
+
+Two real bugs found the hard way, both now fixed in provisioning so
+they don't recur:
+
+- **containerd registry pull** - `crictl`/kubelet's own registry pull
+  never honors `config.toml`'s registry `config_path` on this box's
+  containerd 2.2.1, even with certs correctly configured. Worked
+  around via explicit pre-pull - see "The image pipeline" above.
+- **Swap re-enables itself on a cold boot** - kubelet refuses to start
+  with swap on, and disabling it via `swapoff -a` + commenting out
+  `/etc/fstab` isn't enough on the `bento/ubuntu-22.04` box: it sets up
+  `/swap.img` via its own systemd unit (`swap.img.swap`), independent
+  of fstab, which re-activates on every cold boot (confirmed after a
+  VirtualBox crash left both nodes' kubelet crash-looping).
+  `common.sh` now masks that unit outright.
+
 ## Repo layout
 
 ```
 Vagrantfile              # the whole VM topology + provisioning wiring
 provisioning/             # shell scripts run on each VM by Vagrant
-  common.sh                # shared setup for k8s-master/k8s-worker1 (containerd, kubeadm, node-ip fix)
+  common.sh                # shared setup for k8s-master/k8s-worker1 (containerd, kubeadm, node-ip fix, swap masking)
   master-init.sh            # kubeadm init, Calico, cluster add-ons
   worker-join.sh             # kubeadm join
   buildserver.sh            # docker, registry, build tooling

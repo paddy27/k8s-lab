@@ -1,6 +1,7 @@
 import pytest
 
 from app.aggregate import (
+    build_recommendations,
     parse_cpu_millicores,
     parse_memory_bytes,
     summarize_cluster,
@@ -195,3 +196,131 @@ def test_summarize_namespaces_without_resource_kinds_arg_still_works():
     [entry] = summarize_namespaces(namespaces, [], [])
 
     assert entry["resource_counts"] == {}
+
+
+def _deployment_with_request(namespace, name, container_name, cpu_req, mem_req):
+    return {
+        "metadata": {"namespace": namespace, "name": name},
+        "spec": {
+            "replicas": 1,
+            "template": {"spec": {"containers": [
+                {"name": container_name, "resources": {"requests": {"cpu": cpu_req, "memory": mem_req}}}
+            ]}},
+        },
+        "status": {},
+    }
+
+
+def _vpa_for(namespace, target_name, container_name, lower_cpu, lower_mem, upper_cpu, upper_mem):
+    return {
+        "metadata": {"namespace": namespace, "name": f"{target_name}-auto"},
+        "spec": {
+            "targetRef": {"kind": "Deployment", "name": target_name},
+            "updatePolicy": {"updateMode": "Off"},
+        },
+        "status": {"recommendation": {"containerRecommendations": [{
+            "containerName": container_name,
+            "target": {"cpu": lower_cpu, "memory": lower_mem},
+            "lowerBound": {"cpu": lower_cpu, "memory": lower_mem},
+            "upperBound": {"cpu": upper_cpu, "memory": upper_mem},
+        }]}},
+    }
+
+
+def test_build_recommendations_flags_under_provisioned_container():
+    deployments = [_deployment_with_request("obs", "backend", "backend", "10m", "16Mi")]
+    vpas = [_vpa_for("obs", "backend", "backend", "50m", "64Mi", "200m", "256Mi")]
+
+    recs = build_recommendations(deployments, [], [], vpas, [])
+
+    types = {(r["type"], r["container"]) for r in recs}
+    assert ("VPA", "backend") in types
+    messages = " ".join(r["message"] for r in recs)
+    assert "below the VPA-recommended minimum" in messages
+    assert all(r["severity"] == "warning" for r in recs if r["type"] == "VPA")
+
+
+def test_build_recommendations_flags_no_request_set_distinctly():
+    deployments = [{
+        "metadata": {"namespace": "obs", "name": "backend"},
+        "spec": {
+            "replicas": 1,
+            # no "resources" block at all on the container - a common
+            # real-world case, distinct from "has a request, just too low"
+            "template": {"spec": {"containers": [{"name": "backend"}]}},
+        },
+        "status": {},
+    }]
+    vpas = [_vpa_for("obs", "backend", "backend", "50m", "64Mi", "200m", "256Mi")]
+
+    recs = build_recommendations(deployments, [], [], vpas, [])
+
+    assert any("No CPU request set" in r["message"] for r in recs)
+    assert any("No Memory request set" in r["message"] for r in recs)
+
+
+def test_build_recommendations_flags_over_provisioned_as_info():
+    deployments = [_deployment_with_request("obs", "backend", "backend", "500m", "512Mi")]
+    vpas = [_vpa_for("obs", "backend", "backend", "50m", "64Mi", "200m", "256Mi")]
+
+    recs = build_recommendations(deployments, [], [], vpas, [])
+
+    assert recs
+    assert all(r["severity"] == "info" for r in recs)
+    assert all("above the VPA-recommended maximum" in r["message"] for r in recs)
+
+
+def test_build_recommendations_silent_when_well_sized():
+    deployments = [_deployment_with_request("obs", "backend", "backend", "100m", "128Mi")]
+    vpas = [_vpa_for("obs", "backend", "backend", "50m", "64Mi", "200m", "256Mi")]
+
+    recs = build_recommendations(deployments, [], [], vpas, [])
+
+    assert recs == []
+
+
+def test_build_recommendations_ignores_vpa_with_no_matching_workload():
+    """A VPA whose target no longer exists (deployment deleted, VPA not
+    cleaned up yet) shouldn't crash the recommendation engine."""
+    vpas = [_vpa_for("obs", "ghost", "ghost", "50m", "64Mi", "200m", "256Mi")]
+
+    recs = build_recommendations([], [], [], vpas, [])
+
+    assert recs == []
+
+
+def _hpa(namespace, name, min_replicas, max_replicas, current_replicas):
+    return {
+        "metadata": {"namespace": namespace, "name": name},
+        "spec": {
+            "scaleTargetRef": {"kind": "Deployment", "name": name},
+            "minReplicas": min_replicas,
+            "maxReplicas": max_replicas,
+            "metrics": [],
+        },
+        "status": {"currentReplicas": current_replicas, "desiredReplicas": current_replicas},
+    }
+
+
+def test_build_recommendations_flags_hpa_pinned_at_max():
+    hpas = [_hpa("obs", "backend", 1, 3, 3)]
+
+    recs = build_recommendations([], [], [], [], hpas)
+
+    assert any(r["type"] == "HPA" and "max replicas" in r["message"] for r in recs)
+
+
+def test_build_recommendations_flags_hpa_that_cannot_scale():
+    hpas = [_hpa("obs", "backend", 2, 2, 2)]
+
+    recs = build_recommendations([], [], [], [], hpas)
+
+    assert any("can never actually scale" in r["message"] for r in recs)
+
+
+def test_build_recommendations_no_hpa_warnings_when_healthy():
+    hpas = [_hpa("obs", "backend", 1, 5, 2)]
+
+    recs = build_recommendations([], [], [], [], hpas)
+
+    assert recs == []

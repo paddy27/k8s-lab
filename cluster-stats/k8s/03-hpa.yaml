@@ -1,0 +1,24 @@
+# A real HPA so the "HPA" tables/panels in cluster-stats (and anywhere
+# else reading HorizontalPodAutoscalers) show live data instead of an
+# empty state - there were previously zero HPA objects anywhere in the
+# cluster. Targets cluster-stats' own Deployment, which already has a
+# CPU request (50m) for the utilization target to be computed against.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cluster-stats
+  namespace: cluster-stats
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cluster-stats
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
