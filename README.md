@@ -62,13 +62,14 @@ skips rather than re-initializing or breaking anything.
   (default StorageClass), VPA recommender (recommendation-only - see
   below).
 
-**Two apps**, each deployed the same way (build on `buildserver` → push
-to its registry → pre-pull onto cluster nodes → `kubectl apply`):
+**Three apps**, each deployed the same way (build on `buildserver` →
+push to its registry → pre-pull onto cluster nodes → `kubectl apply`):
 
 | App | What | Docs |
 |---|---|---|
 | [`observability-platform`](observability-platform/) *(submodule)* | Anomaly detection for time-series metrics - FastAPI + TimescaleDB + Redis + a scikit-learn worker | its own README; deploy flow in [`k8s-manifests/README.md`](k8s-manifests/README.md) |
 | [`cluster-stats`](cluster-stats/) | Full cluster observability app - node/namespace/pod resources, workload health, HPA status, VPA min/max recommendations | [`cluster-stats/README.md`](cluster-stats/README.md) |
+| [`cluster-monitor`](cluster-monitor/) | Intelligent issue detection - CrashLoopBackOff, OOMKilled, NodeNotReady, high CPU/mem, and more, with full history in Postgres. React/Vite/Tailwind + FastAPI + official `kubernetes` Python client | [`cluster-monitor/README.md`](cluster-monitor/README.md) |
 
 ## The image pipeline
 
@@ -81,6 +82,7 @@ pre-pulled onto the cluster nodes:
 # e.g.
 ./deploy-image.sh cluster-stats v3 cluster-stats
 ./deploy-image.sh observability-backend v3 observability-platform/backend
+./deploy-image.sh cluster-monitor v3 cluster-monitor
 ```
 
 **Why the explicit pre-pull instead of just letting kubelet pull it**:
@@ -107,8 +109,7 @@ how.
 
 ## Known quirks fixed along the way
 
-Two real bugs found the hard way, both now fixed in provisioning so
-they don't recur:
+Real bugs found the hard way, all now fixed so they don't recur:
 
 - **containerd registry pull** - `crictl`/kubelet's own registry pull
   never honors `config.toml`'s registry `config_path` on this box's
@@ -121,6 +122,13 @@ they don't recur:
   of fstab, which re-activates on every cold boot (confirmed after a
   VirtualBox crash left both nodes' kubelet crash-looping).
   `common.sh` now masks that unit outright.
+- **`cryptography`'s compiled Rust extension SIGILLs on this host's
+  virtualized arm64 CPU** - hit deploying `cluster-monitor` (the
+  official `kubernetes` Python client pulls it in transitively via
+  `google-auth`, even for plain in-cluster token auth). See
+  [`cluster-monitor/README.md`](cluster-monitor/README.md) for the
+  full bisection; fixed by pinning `cryptography==42.0.5` instead of
+  letting pip resolve an unconstrained, much newer release.
 
 ## Repo layout
 

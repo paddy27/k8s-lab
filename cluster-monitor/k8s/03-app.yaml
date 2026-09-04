@@ -1,0 +1,55 @@
+# Image built on buildserver and pushed to its local registry, then
+# pre-pulled onto cluster nodes - see ../deploy-image.sh and
+# k8s-manifests/README.md at the repo root for why imagePullPolicy is
+# IfNotPresent rather than the default Always.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-monitor
+  namespace: cluster-monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-monitor
+  template:
+    metadata:
+      labels:
+        app: cluster-monitor
+    spec:
+      serviceAccountName: cluster-monitor
+      containers:
+        - name: cluster-monitor
+          image: 192.168.56.20:5000/cluster-monitor:v3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: postgres-secret, key: DATABASE_URL }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-monitor
+  namespace: cluster-monitor
+spec:
+  selector:
+    app: cluster-monitor
+  type: NodePort
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30091

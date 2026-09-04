@@ -1,0 +1,79 @@
+# Local-dev credentials, same spirit as the other apps in this lab
+# (observability-platform's obs/obs) - change before this ever points
+# at anything real.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: cluster-monitor
+type: Opaque
+stringData:
+  POSTGRES_USER: monitor
+  POSTGRES_PASSWORD: monitor
+  POSTGRES_DB: cluster_monitor
+  DATABASE_URL: postgresql+psycopg2://monitor:monitor@postgres:5432/cluster_monitor
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: cluster-monitor
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: cluster-monitor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single ReadWriteOnce volume - never run two pods at once
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef: { name: postgres-secret }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata # avoid postgres complaining about lost+found in a fresh volume root
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "monitor", "-d", "cluster_monitor"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 300m, memory: 384Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: cluster-monitor
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

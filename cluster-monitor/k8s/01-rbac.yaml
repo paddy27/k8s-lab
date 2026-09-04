@@ -1,0 +1,34 @@
+# Read-only cluster-wide. Only what Phase 2 detection actually reads:
+# pods, nodes, events, and node metrics. No write verbs on anything -
+# this app only ever observes and records to its own Postgres, never
+# touches a cluster resource.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-monitor
+  namespace: cluster-monitor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-monitor-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-monitor-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitor-reader
+subjects:
+  - kind: ServiceAccount
+    name: cluster-monitor
+    namespace: cluster-monitor
