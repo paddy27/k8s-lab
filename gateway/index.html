@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>k8s-lab</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg: #0f1115; --panel: #171a21; --border: #2a2e38; --text: #e6e8ec; --muted: #8b93a3; --accent: #4f8cff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 480px; padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+  a.card { display: block; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 12px; text-decoration: none; color: var(--text); transition: border-color 0.15s; }
+  a.card:hover { border-color: var(--accent); }
+  a.card .name { font-weight: 600; font-size: 15px; }
+  a.card .desc { color: var(--muted); font-size: 13px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>k8s-lab</h1>
+  <p class="sub">One entrypoint for both cluster apps.</p>
+  <a class="card" href="/stats/">
+    <div class="name">cluster-stats →</div>
+    <div class="desc">Node/namespace/pod resources, workload health, HPA status, VPA min/max recommendations.</div>
+  </a>
+  <a class="card" href="/monitor/">
+    <div class="name">cluster-monitor →</div>
+    <div class="desc">Intelligent issue detection - CrashLoopBackOff, OOMKilled, NodeNotReady, and more - with history.</div>
+  </a>
+</main>
+</body>
+</html>

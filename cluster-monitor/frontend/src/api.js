@@ -12,6 +12,8 @@ function withQuery(path, params) {
   return s ? `${path}?${s}` : path;
 }
 
-export const getClusterSummary = () => getJSON("/api/cluster/summary");
-export const getIssuesSummary = () => getJSON("/api/issues/summary");
-export const getIssues = (filters) => getJSON(withQuery("/api/issues", filters));
+// Relative (no leading "/") so these resolve against <base href="/monitor/">
+// in index.html rather than the gateway's root - see the comment there.
+export const getClusterSummary = () => getJSON("api/cluster/summary");
+export const getIssuesSummary = () => getJSON("api/issues/summary");
+export const getIssues = (filters) => getJSON(withQuery("api/issues", filters));

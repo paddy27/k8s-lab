@@ -65,11 +65,20 @@ skips rather than re-initializing or breaking anything.
 **Three apps**, each deployed the same way (build on `buildserver` →
 push to its registry → pre-pull onto cluster nodes → `kubectl apply`):
 
-| App | What | Docs |
-|---|---|---|
-| [`observability-platform`](observability-platform/) *(submodule)* | Anomaly detection for time-series metrics - FastAPI + TimescaleDB + Redis + a scikit-learn worker | its own README; deploy flow in [`k8s-manifests/README.md`](k8s-manifests/README.md) |
-| [`cluster-stats`](cluster-stats/) | Full cluster observability app - node/namespace/pod resources, workload health, HPA status, VPA min/max recommendations | [`cluster-stats/README.md`](cluster-stats/README.md) |
-| [`cluster-monitor`](cluster-monitor/) | Intelligent issue detection - CrashLoopBackOff, OOMKilled, NodeNotReady, high CPU/mem, and more, with full history in Postgres. React/Vite/Tailwind + FastAPI + official `kubernetes` Python client | [`cluster-monitor/README.md`](cluster-monitor/README.md) |
+| App | What | URL | Docs |
+|---|---|---|---|
+| [`observability-platform`](observability-platform/) *(submodule)* | Anomaly detection for time-series metrics - FastAPI + TimescaleDB + Redis + a scikit-learn worker | `192.168.56.11:30080` | its own README; deploy flow in [`k8s-manifests/README.md`](k8s-manifests/README.md) |
+| [`cluster-stats`](cluster-stats/) | Full cluster observability app - node/namespace/pod resources, workload health, HPA status, VPA min/max recommendations | `192.168.56.11:30090/stats/` | [`cluster-stats/README.md`](cluster-stats/README.md) |
+| [`cluster-monitor`](cluster-monitor/) | Intelligent issue detection - CrashLoopBackOff, OOMKilled, NodeNotReady, high CPU/mem, and more, with full history in Postgres. React/Vite/Tailwind + FastAPI + official `kubernetes` Python client | `192.168.56.11:30090/monitor/` | [`cluster-monitor/README.md`](cluster-monitor/README.md) |
+
+`cluster-stats` and `cluster-monitor` share one port through
+[`gateway`](gateway/) - a small nginx reverse proxy, path-routed
+(`/stats/`, `/monitor/`). Both Services are `ClusterIP`, not directly
+exposed - see [`gateway/README.md`](gateway/README.md) for why a
+straight merge into one backend wasn't an option (their APIs already
+collide on `/api/cluster/summary`) and how the path routing actually
+works. `observability-platform` isn't behind it (yet) - still its own
+NodePort.
 
 ## The image pipeline
 
@@ -83,6 +92,7 @@ pre-pulled onto the cluster nodes:
 ./deploy-image.sh cluster-stats v3 cluster-stats
 ./deploy-image.sh observability-backend v3 observability-platform/backend
 ./deploy-image.sh cluster-monitor v3 cluster-monitor
+./deploy-image.sh gateway v1 gateway
 ```
 
 **Why the explicit pre-pull instead of just letting kubelet pull it**:
@@ -142,8 +152,10 @@ provisioning/             # shell scripts run on each VM by Vagrant
   monitoring.sh              # Prometheus + Grafana
 k8s-manifests/            # observability-platform's k8s manifests + deploy docs
 cluster-stats/             # the cluster-stats app (source + its own k8s manifests)
+cluster-monitor/            # the cluster-monitor app (source + its own k8s manifests)
+gateway/                     # nginx reverse proxy fronting cluster-stats + cluster-monitor
 observability-platform/    # git submodule -> github.com/paddy27/observability-platform
-deploy-image.sh            # generic build -> push -> pre-pull pipeline, used by both apps
+deploy-image.sh            # generic build -> push -> pre-pull pipeline, used by every app
 shared_folder/              # synced into every VM; also where the join token/admin.conf land (gitignored)
 ```
 

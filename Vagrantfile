@@ -94,6 +94,10 @@ Vagrant.configure("2") do |config|
                               "/cluster-monitor",
                               create: true
 
+        node.vm.synced_folder "./gateway",
+                              "/gateway",
+                              create: true
+
         node.vm.provision "shell",
           path: "provisioning/buildserver.sh"
 

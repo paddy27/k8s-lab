@@ -20,7 +20,7 @@ spec:
       serviceAccountName: cluster-monitor
       containers:
         - name: cluster-monitor
-          image: 192.168.56.20:5000/cluster-monitor:v3
+          image: 192.168.56.20:5000/cluster-monitor:v4
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -46,10 +46,11 @@ metadata:
   name: cluster-monitor
   namespace: cluster-monitor
 spec:
+  # ClusterIP (default) - reachable only from inside the cluster now.
+  # External access goes through ../../gateway/ at :30090/monitor/,
+  # which replaces the NodePort this used to have directly.
   selector:
     app: cluster-monitor
-  type: NodePort
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 30091

@@ -21,7 +21,7 @@ spec:
       serviceAccountName: cluster-stats
       containers:
         - name: cluster-stats
-          image: 192.168.56.20:5000/cluster-stats:v4
+          image: 192.168.56.20:5000/cluster-stats:v5
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -43,10 +43,11 @@ metadata:
   name: cluster-stats
   namespace: cluster-stats
 spec:
+  # ClusterIP (default) - reachable only from inside the cluster now.
+  # External access goes through ../../gateway/ at :30090/stats/, which
+  # replaces the NodePort this used to have directly.
   selector:
     app: cluster-stats
-  type: NodePort
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 30090

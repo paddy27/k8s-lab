@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>cluster-monitor</title>
+    <!-- Served behind the gateway's /monitor/ path prefix (nginx strips
+         it before forwarding to this backend, which still only knows
+         its own native "/api/..." paths) - this makes every relative
+         asset/fetch reference resolve against /monitor/, regardless of
+         whether the browser's address bar has a trailing slash. -->
+    <base href="/monitor/" />
   </head>
   <body class="bg-slate-950 text-slate-100">
     <div id="root"></div>

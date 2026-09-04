@@ -20,6 +20,15 @@ so this is what makes the HPA table/recommendations non-empty.
 [`../k8s-manifests/README.md`](../k8s-manifests/README.md)-style flow -
 build+push+pre-pull via `../deploy-image.sh`, then `kubectl apply -f k8s/`.
 
+The Service is `ClusterIP` (not directly exposed) - reachable at
+`http://192.168.56.11:30090/stats/` via [`../gateway`](../gateway/),
+which also serves [`cluster-monitor`](../cluster-monitor/) at
+`/monitor/` on the same port. `app/static/index.html` has
+`<base href="/stats/">` and every API call uses a relative (no
+leading `/`) path specifically so this works regardless of the
+browser's trailing slash - see the comment there if you're adding a
+new one.
+
 **Locally, against the real cluster**, for development:
 
 ```bash

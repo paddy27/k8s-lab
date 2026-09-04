@@ -1,0 +1,46 @@
+# A plain nginx reverse proxy - no RBAC needed, it never talks to the
+# k8s API, only to cluster-stats/cluster-monitor's ClusterIP Services
+# (ordinary in-cluster DNS, works across namespaces without anything
+# extra since no NetworkPolicy restricts it).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: 192.168.56.20:5000/gateway:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: gateway
+spec:
+  selector:
+    app: gateway
+  type: NodePort
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30090

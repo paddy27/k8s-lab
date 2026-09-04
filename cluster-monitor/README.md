@@ -74,7 +74,15 @@ before ever rolling it out to the cluster.
 **In the cluster**: `../deploy-image.sh cluster-monitor <tag> cluster-monitor`
 (builds on `buildserver`, pushes to its registry, pre-pulls onto both
 nodes - see the repo root README for why), then
-`kubectl apply -f k8s/`. Reachable at `http://192.168.56.11:30091`.
+`kubectl apply -f k8s/`.
+
+The Service is `ClusterIP` (not directly exposed) - reachable at
+`http://192.168.56.11:30090/monitor/` via [`../gateway`](../gateway/),
+which also serves [`cluster-stats`](../cluster-stats/) at `/stats/` on
+the same port. `index.html` has `<base href="/monitor/">` and every
+`fetch()` in `src/api.js` uses a relative (no leading `/`) path
+specifically so this works regardless of the browser's trailing slash
+- see the comments in both files if you're changing either.
 
 **Locally, backend only, against the real cluster**:
 

@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <title>cluster-stats</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Served behind the gateway's /stats/ path prefix (nginx strips it
+     before forwarding to this backend, which still only knows its own
+     native "/api/..." paths) - this makes every relative fetch/asset
+     reference below resolve against /stats/, regardless of whether the
+     browser's address bar has a trailing slash. -->
+<base href="/stats/">
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --border: #2a2e38; --text: #e6e8ec;
@@ -176,7 +182,7 @@ function renderTable(tableId, columns, rows) {
 }
 
 async function refreshNodes() {
-  const nodes = await getJSON("/api/nodes");
+  const nodes = await getJSON("api/nodes");
   renderTable("nodes-table", [
     { label: "Name", render: n => n.name },
     { label: "Ready", render: n => n.ready ? pill("Ready", "good") : pill("NotReady", "bad") },
@@ -201,7 +207,7 @@ function syncNamespaceOptions(namespaceNames) {
 }
 
 async function refreshNamespaces() {
-  const ns = await getJSON("/api/namespaces");
+  const ns = await getJSON("api/namespaces");
   syncNamespaceOptions(ns.map(n => n.name));
   renderTable("namespaces-table", [
     { label: "Namespace", render: n => n.name },
@@ -217,7 +223,7 @@ async function refreshNamespaces() {
 }
 
 async function refreshRecommendations() {
-  const recs = await getJSON(withQuery("/api/recommendations", { namespace: filters.namespace }));
+  const recs = await getJSON(withQuery("api/recommendations", { namespace: filters.namespace }));
   const wrap = document.getElementById("recommendations-list");
   if (!recs.length) {
     wrap.innerHTML = `<div class="empty">No recommendations right now - everything's within the VPA-recommended range and no HPA is pinned at its limits.</div>`;
@@ -234,7 +240,7 @@ async function refreshRecommendations() {
 }
 
 async function refreshWorkloads() {
-  const workloads = await getJSON(withQuery("/api/workloads", { namespace: filters.namespace }));
+  const workloads = await getJSON(withQuery("api/workloads", { namespace: filters.namespace }));
   renderTable("workloads-table", [
     { label: "Namespace", render: w => w.namespace },
     { label: "Kind", render: w => w.kind },
@@ -246,7 +252,7 @@ async function refreshWorkloads() {
 }
 
 async function refreshPods() {
-  const pods = await getJSON(withQuery("/api/pods", { namespace: filters.namespace }));
+  const pods = await getJSON(withQuery("api/pods", { namespace: filters.namespace }));
   renderTable("pods-table", [
     { label: "Namespace", render: p => p.namespace },
     { label: "Pod", render: p => p.name },
@@ -259,7 +265,7 @@ async function refreshPods() {
 }
 
 async function refreshHpa() {
-  const hpas = await getJSON(withQuery("/api/autoscaling/hpa", { namespace: filters.namespace }));
+  const hpas = await getJSON(withQuery("api/autoscaling/hpa", { namespace: filters.namespace }));
   const wrap = document.getElementById("hpa-wrap");
   if (!hpas.length) { wrap.innerHTML = `<div class="empty">No HorizontalPodAutoscalers in the cluster yet.</div>`; return; }
   const table = document.createElement("table");
@@ -279,7 +285,7 @@ async function refreshHpa() {
 }
 
 async function refreshVpa() {
-  const vpas = await getJSON(withQuery("/api/autoscaling/vpa", { namespace: filters.namespace, only_with_data: filters.onlyVpaWithData }));
+  const vpas = await getJSON(withQuery("api/autoscaling/vpa", { namespace: filters.namespace, only_with_data: filters.onlyVpaWithData }));
   const wrap = document.getElementById("vpa-wrap");
   if (!vpas.length) {
     wrap.innerHTML = filters.onlyVpaWithData
@@ -313,7 +319,7 @@ async function refreshVpa() {
 async function refreshAll() {
   const status = document.getElementById("status");
   try {
-    const cluster = await getJSON("/api/cluster/summary");
+    const cluster = await getJSON("api/cluster/summary");
     renderCards(cluster);
     await Promise.all([refreshNodes(), refreshNamespaces(), refreshRecommendations(), refreshWorkloads(), refreshPods(), refreshHpa(), refreshVpa()]);
     status.textContent = `updated ${new Date().toLocaleTimeString()}`;
