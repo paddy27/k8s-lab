@@ -103,7 +103,13 @@ cause analysis, and more) is being added incrementally, prioritized as:
       detection (`InsufficientCPU`, `TaintsAndTolerations`, node/pod
       affinity, ...) plus `PodDistributionImbalance`, see
       [`cluster-monitor/README.md`](cluster-monitor/README.md#scheduling-analysis-top-5-priority-2)
-- [ ] Storage / PVC Capacity Prediction
+- [x] **Storage / PVC Capacity Prediction** - `cluster-monitor`'s
+      `PVCAlmostFull`/`PVCCapacityExhaustionPredicted`/`UnusedPVC`/
+      `OrphanedPV`/`FailedPVCBinding`, via the kubelet's `stats/summary`
+      proxied through the API server - see
+      [`cluster-monitor/README.md`](cluster-monitor/README.md#storage-analysis-top-5-priority-3)
+      for a real limitation found running it against this lab's own
+      `hostPath`-backed StorageClass
 - [ ] Best Practices & Security (misconfigured workloads)
 - [ ] Root Cause Analysis (correlating events, deployments, restarts, metrics)
 

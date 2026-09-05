@@ -20,6 +20,7 @@ Health" phase; add it back here when that's actually built, not before.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -55,6 +56,70 @@ def list_node_metrics(custom: client.CustomObjectsApi) -> list[dict]:
 
 def list_pods(core: client.CoreV1Api) -> list[dict]:
     return core.list_pod_for_all_namespaces().to_dict()["items"]
+
+
+def list_persistentvolumeclaims(core: client.CoreV1Api) -> list[dict]:
+    return core.list_persistent_volume_claim_for_all_namespaces().to_dict()["items"]
+
+
+def list_persistentvolumes(core: client.CoreV1Api) -> list[dict]:
+    return core.list_persistent_volume().to_dict()["items"]
+
+
+def list_node_volume_stats(core: client.CoreV1Api, node_name: str) -> list[dict]:
+    """Per-PVC used/capacity/available bytes for every PVC-backed volume
+    currently mounted on this node, from the kubelet's own stats/summary
+    endpoint - proxied through the API server (nodes/proxy RBAC, this app
+    never talks to a node directly). This is the *only* place real PVC
+    usage lives: PersistentVolumeClaim/PersistentVolume objects only ever
+    carry requested/bound capacity, never how much of it is used.
+
+    Empty list (not an exception) if this node's proxy is unreachable,
+    RBAC hasn't propagated yet, or the response can't be parsed - usage
+    data is layered on top of the PVC/PV objects' own status, not a hard
+    dependency for this app to run.
+
+    _preload_content=False is load-bearing, not cosmetic: the generated
+    client has no declared response schema for an arbitrary proxy path,
+    so its default deserialization path parses the JSON body and then
+    re-stringifies it with Python's str() - producing a single-quoted
+    dict repr, not valid JSON, which silently breaks json.loads on
+    anything but trivial payloads. Passing _preload_content=False skips
+    that and hands back the raw urllib3 response so .data can be
+    json.loads'd directly. Confirmed the hard way against a real kubelet:
+    without this, every call here raised
+    `json.decoder.JSONDecodeError: Expecting property name enclosed in
+    double quotes` on the very first real response."""
+    try:
+        response = core.connect_get_node_proxy_with_path(node_name, "stats/summary", _preload_content=False)
+        data = json.loads(response.data)
+    except (client.ApiException, ValueError):
+        return []
+
+    stats = []
+    for pod in data.get("pods", []) or []:
+        pod_ref = pod.get("podRef", {})
+        for vol in pod.get("volume", []) or []:
+            pvc_ref = vol.get("pvcRef")
+            if not pvc_ref:
+                continue  # emptyDir/configMap/... - not a PVC, nothing to track
+            stats.append({
+                "namespace": pvc_ref.get("namespace"),
+                "pvc_name": pvc_ref.get("name"),
+                "pod_namespace": pod_ref.get("namespace"),
+                "pod_name": pod_ref.get("name"),
+                "used_bytes": vol.get("usedBytes"),
+                "capacity_bytes": vol.get("capacityBytes"),
+                "available_bytes": vol.get("availableBytes"),
+            })
+    return stats
+
+
+def list_all_volume_stats(core: client.CoreV1Api, nodes: list[dict]) -> list[dict]:
+    stats = []
+    for node in nodes:
+        stats.extend(list_node_volume_stats(core, node["metadata"]["name"]))
+    return stats
 
 
 def list_recent_warning_events(core: client.CoreV1Api, lookback_minutes: int = 30) -> list[dict]:

@@ -1,7 +1,8 @@
-# Read-only cluster-wide. Only what Phase 2 detection actually reads:
-# pods, nodes, events, and node metrics. No write verbs on anything -
-# this app only ever observes and records to its own Postgres, never
-# touches a cluster resource.
+# Read-only cluster-wide. Only what Phase 2 detection + Storage Analysis
+# actually read: pods, nodes, events, node metrics, PVCs/PVs, and the
+# nodes/proxy path (see below). No write verbs on anything - this app
+# only ever observes and records to its own Postgres, never touches a
+# cluster resource.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -14,11 +15,24 @@ metadata:
   name: cluster-monitor-reader
 rules:
   - apiGroups: [""]
-    resources: ["pods", "nodes", "events"]
+    resources: ["pods", "nodes", "events", "persistentvolumeclaims", "persistentvolumes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes"]
     verbs: ["get", "list"]
+  # Broader than anything else this app is granted, and worth calling
+  # out explicitly: nodes/proxy lets the ServiceAccount reach *any*
+  # kubelet-exposed HTTP path on any node (RBAC can't scope by
+  # sub-path), not just stats/summary - which is the only one
+  # k8s_client.py ever calls. There's no narrower supported way to read
+  # real PVC usage: PersistentVolumeClaim/PersistentVolume objects only
+  # ever carry requested/bound capacity, never how much of it is used -
+  # the kubelet's own stats/summary endpoint is the only place that
+  # exists. Accepted deliberately for Storage Analysis (see
+  # cluster-monitor/README.md); get only, no exec/attach/log verbs.
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

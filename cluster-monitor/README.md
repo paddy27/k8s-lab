@@ -56,6 +56,56 @@ generic `PendingPod`:
 | `PodAffinity` | warning | `"match pod affinity"` |
 | `PodAntiAffinity` | warning | `"anti-affinity"` |
 
+## Storage Analysis (Top 5 priority #3)
+
+`app/storage.py` + a new `pvc_usage_samples` table (`app/db.py`). The
+Kubernetes API genuinely cannot answer "how full is this PVC?" - a
+PersistentVolumeClaim/PersistentVolume object only ever carries
+*requested*/*bound* capacity, never usage. The only place real usage
+lives is the kubelet's own `stats/summary` endpoint, reached via the API
+server's node proxy (`k8s_client.list_all_volume_stats` /
+`connect_get_node_proxy_with_path`, RBAC `nodes/proxy` get - see the
+callout in `k8s/01-rbac.yaml`, it's a broader grant than anything else
+in this app and worth reading before assuming it's free).
+
+| Rule | Severity | Source |
+|---|---|---|
+| `FailedPVCBinding` | critical | PVC stuck `Pending` |
+| `PVCAlmostFull` | critical ≥ 90%, warning ≥ 75% | latest kubelet usage/capacity sample |
+| `PVCCapacityExhaustionPredicted` | critical ≤ 2 days out, warning ≤ 7 | linear fit over stored samples, extrapolated to capacity |
+| `UnusedPVC` | info | `Bound`, but no running pod currently mounts it |
+| `OrphanedPV` | warning | PV `Released` - claim deleted, reclaim policy kept the storage |
+
+Usage is sampled roughly every 5 minutes (`main.py`'s
+`STORAGE_SAMPLE_EVERY_N_CYCLES`, not every 30s detection cycle - a
+volume filling up over days doesn't need that resolution, and the table
+would otherwise grow unbounded; `db.prune_old_pvc_usage_samples` caps
+history at 30 days). `predict_days_to_exhaustion` is an ordinary
+least-squares fit of used bytes over time - same "needs a few samples
+before it means anything" caveat as the VPA recommender elsewhere in
+this project, not a guess dressed up as a hard number.
+
+**A real limitation, found running this against the lab's own
+cluster**: this lab's only StorageClass is `local-path-provisioner`,
+which is `hostPath` under the hood - and the kubelet's volume-stats
+collector has no `MetricsProvider` implementation for the `hostPath`
+plugin, so `usedBytes`/`capacityBytes` are simply never reported for
+*any* PVC here, no matter how full it actually gets.
+`PVCAlmostFull`/`PVCCapacityExhaustionPredicted` are correct and
+covered by `tests/test_storage.py`'s synthetic-data tests, and will
+work against any real CSI driver that implements volume metrics (EBS
+CSI, PD CSI, Ceph, Longhorn, OpenEBS, ... - the overwhelming majority of
+production storage classes) - just not against this lab's own storage
+backend. `FailedPVCBinding`, `UnusedPVC`, and `OrphanedPV` are
+unaffected - they only read PVC/PV object status, never usage.
+
+**Deliberately not built this pass**: `VolumeAttachmentIssues` (already
+covered by the existing `Event:FailedMount`/`Event:FailedAttachVolume`
+catch-all - a dedicated rule would just duplicate it) and
+`StorageClassAnalysis` (misconfigured/missing StorageClass references -
+not enough signal to be worth a dedicated rule with only one
+StorageClass in this lab).
+
 Plus one cross-pod check, `PodDistributionImbalance`
 (`detect_scheduling_distribution_issues`): every *running* replica of
 some workload landed on a single node - grouped by each pod's immediate

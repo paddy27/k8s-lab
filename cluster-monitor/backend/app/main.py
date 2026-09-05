@@ -11,8 +11,17 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app import detector, k8s_client
-from app.db import Issue, SessionLocal, get_db, init_db, reconcile_issues
+from app import detector, k8s_client, storage
+from app.db import (
+    Issue,
+    SessionLocal,
+    get_db,
+    init_db,
+    load_recent_pvc_samples,
+    prune_old_pvc_usage_samples,
+    record_pvc_usage_samples,
+    reconcile_issues,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cluster-monitor")
@@ -20,23 +29,42 @@ logger = logging.getLogger("cluster-monitor")
 DETECTION_INTERVAL_SECONDS = 30
 EVENT_LOOKBACK_MINUTES = 30
 
+# PVC usage is sampled far less often than issues are detected - a volume
+# filling up over days/weeks doesn't need 30-second resolution, and the
+# pvc_usage_samples table would otherwise grow unbounded. ~10 cycles at
+# 30s/cycle is roughly every 5 minutes.
+STORAGE_SAMPLE_EVERY_N_CYCLES = 10
+
+_cycle_count = 0
+
 
 async def _detection_loop(core, custom) -> None:
+    global _cycle_count
     while True:
         try:
             pods = await asyncio.to_thread(k8s_client.list_pods, core)
             nodes = await asyncio.to_thread(k8s_client.list_nodes, core)
             node_metrics = await asyncio.to_thread(k8s_client.list_node_metrics, custom)
             events = await asyncio.to_thread(k8s_client.list_recent_warning_events, core, EVENT_LOOKBACK_MINUTES)
-
-            issues = detector.detect_all_issues(pods, nodes, node_metrics, events)
+            pvcs = await asyncio.to_thread(k8s_client.list_persistentvolumeclaims, core)
+            pvs = await asyncio.to_thread(k8s_client.list_persistentvolumes, core)
+            volume_stats = await asyncio.to_thread(k8s_client.list_all_volume_stats, core, nodes)
 
             db = SessionLocal()
             try:
+                if _cycle_count % STORAGE_SAMPLE_EVERY_N_CYCLES == 0:
+                    record_pvc_usage_samples(db, volume_stats)
+                    prune_old_pvc_usage_samples(db)
+                samples_by_pvc = load_recent_pvc_samples(db)
+
+                issues = detector.detect_all_issues(pods, nodes, node_metrics, events)
+                issues += storage.build_storage_issues(pvcs, pvs, pods, volume_stats, samples_by_pvc)
+
                 reconcile_issues(db, issues)
             finally:
                 db.close()
 
+            _cycle_count += 1
             logger.info("detection cycle: %d issue(s) currently active", len(issues))
         except Exception:
             logger.exception("detection cycle failed")

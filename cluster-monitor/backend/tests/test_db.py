@@ -1,8 +1,18 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db import Base, Issue, reconcile_issues
+from app.db import (
+    Base,
+    Issue,
+    PvcUsageSample,
+    load_recent_pvc_samples,
+    prune_old_pvc_usage_samples,
+    reconcile_issues,
+    record_pvc_usage_samples,
+)
 
 
 @pytest.fixture
@@ -80,3 +90,49 @@ def test_reconcile_keeps_unrelated_issues_untouched(db):
     rows = {r.resource_name: r for r in db.query(Issue).all()}
     assert rows["a"].active is True
     assert rows["b"].active is False
+
+
+def _volume_stat(namespace="obs", pvc_name="data", used_bytes=1024, capacity_bytes=10 * 1024**3):
+    return {"namespace": namespace, "pvc_name": pvc_name, "used_bytes": used_bytes, "capacity_bytes": capacity_bytes}
+
+
+def test_record_pvc_usage_samples_inserts_one_row_per_stat(db):
+    record_pvc_usage_samples(db, [_volume_stat(pvc_name="a"), _volume_stat(pvc_name="b")])
+
+    assert db.query(PvcUsageSample).count() == 2
+
+
+def test_record_pvc_usage_samples_skips_entries_with_no_capacity(db):
+    """A PVC-backed volume the kubelet reported with no capacity figure
+    (e.g. mid-mount) isn't useful history - skip it rather than storing
+    a sample that would poison the trend fit with a zero/None capacity."""
+    record_pvc_usage_samples(db, [{"namespace": "obs", "pvc_name": "a", "used_bytes": 100, "capacity_bytes": None}])
+
+    assert db.query(PvcUsageSample).count() == 0
+
+
+def test_load_recent_pvc_samples_groups_by_pvc_ascending_by_time(db):
+    record_pvc_usage_samples(db, [_volume_stat(pvc_name="a", used_bytes=100)])
+    record_pvc_usage_samples(db, [_volume_stat(pvc_name="a", used_bytes=200)])
+
+    by_pvc = load_recent_pvc_samples(db)
+
+    [(namespace, pvc_name)] = by_pvc.keys()
+    assert (namespace, pvc_name) == ("obs", "a")
+    used_values = [s[1] for s in by_pvc[("obs", "a")]]
+    assert used_values == [100, 200]  # ascending by time, not insertion order coincidence
+
+
+def test_prune_old_pvc_usage_samples_removes_only_stale_rows(db):
+    fresh = PvcUsageSample(namespace="obs", pvc_name="a", used_bytes=1, capacity_bytes=10,
+                            sampled_at=datetime.now(timezone.utc))
+    stale = PvcUsageSample(namespace="obs", pvc_name="a", used_bytes=1, capacity_bytes=10,
+                            sampled_at=datetime.now(timezone.utc) - timedelta(days=60))
+    db.add_all([fresh, stale])
+    db.commit()
+
+    prune_old_pvc_usage_samples(db, retention_days=30)
+
+    remaining = db.query(PvcUsageSample).all()
+    assert len(remaining) == 1
+    assert remaining[0].used_bytes == fresh.used_bytes and remaining[0].sampled_at == fresh.sampled_at
