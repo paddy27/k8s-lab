@@ -8,6 +8,8 @@ history. A separate build from [`../cluster-stats`](../cluster-stats/)
 (which covers VPA/HPA resource recommendations) - this one is about
 **detecting what's actually wrong**, not resource sizing.
 
+![cluster-monitor dashboard](../docs/screenshots/cluster-monitor.png)
+
 ## What it detects (Phase 2: Intelligent Detection)
 
 A background loop polls the cluster every 30s and reconciles what it

@@ -80,6 +80,17 @@ collide on `/api/cluster/summary`) and how the path routing actually
 works. `observability-platform` isn't behind it (yet) - still its own
 NodePort.
 
+### Screenshots
+
+**cluster-stats** (`/stats/`) - cluster/namespace/node resources,
+workload health, and VPA/HPA recommendations:
+
+![cluster-stats dashboard](docs/screenshots/cluster-stats.png)
+
+**cluster-monitor** (`/monitor/`) - detected issues, live:
+
+![cluster-monitor dashboard](docs/screenshots/cluster-monitor.png)
+
 ## The image pipeline
 
 There's no public registry involved. Images are built **on

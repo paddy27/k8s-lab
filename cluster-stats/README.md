@@ -10,6 +10,8 @@ Talks to the Kubernetes API server directly (not Prometheus) via a
 scoped ServiceAccount, so it stays accurate even if the monitoring
 stack on the `monitoring` VM is down.
 
+![cluster-stats dashboard](../docs/screenshots/cluster-stats.png)
+
 `k8s/03-hpa.yaml` gives the app its own real HPA (CPU-based, 1-3
 replicas) - there were previously zero HPAs anywhere in the cluster,
 so this is what makes the HPA table/recommendations non-empty.
