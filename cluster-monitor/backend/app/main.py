@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app import best_practices, cluster_health, detector, k8s_client, predictions, root_cause, storage
+from app import networking as networking_analysis  # avoids shadowing the NetworkingV1Api param named `networking` below
 from app.db import (
     Issue,
     SessionLocal,
@@ -81,6 +82,9 @@ async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -
             pdbs = await asyncio.to_thread(k8s_client.list_poddisruptionbudgets, policy)
             networkpolicies = await asyncio.to_thread(k8s_client.list_networkpolicies, networking)
             hpas = await asyncio.to_thread(k8s_client.list_hpas, autoscaling)
+            services = await asyncio.to_thread(k8s_client.list_services, core)
+            endpoints = await asyncio.to_thread(k8s_client.list_endpoints, core)
+            ingresses = await asyncio.to_thread(k8s_client.list_ingresses, networking)
 
             _latest_pods, _latest_deployments, _latest_statefulsets = pods, deployments, statefulsets
             _latest_nodes, _latest_node_resource_stats = nodes, node_resource_stats
@@ -111,6 +115,7 @@ async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -
                 issues += predictions.build_all_prediction_issues(
                     samples_by_node, [(t, r) for t, _, r in cluster_snapshots],
                 )
+                issues += networking_analysis.build_all_networking_issues(services, endpoints, deployments, ingresses)
 
                 reconcile_issues(db, issues)
             finally:

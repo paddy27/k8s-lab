@@ -17,7 +17,7 @@ metadata:
   name: cluster-monitor-reader
 rules:
   - apiGroups: [""]
-    resources: ["pods", "nodes", "events", "persistentvolumeclaims", "persistentvolumes"]
+    resources: ["pods", "nodes", "events", "persistentvolumeclaims", "persistentvolumes", "services", "endpoints"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes"]
@@ -42,7 +42,7 @@ rules:
     resources: ["poddisruptionbudgets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
+    resources: ["networkpolicies", "ingresses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]

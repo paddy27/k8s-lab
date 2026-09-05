@@ -346,6 +346,46 @@ Uses the last detection cycle's cached state (`_latest_nodes` et al. in
 `main.py`), same pattern as `/api/incidents` - no new RBAC, no new K8s
 objects fetched.
 
+## Networking Analysis (beyond the original Top 5)
+
+`app/networking.py`. New RBAC: `services`, `endpoints` (core), and
+`ingresses` (`networking.k8s.io`, alongside the existing
+`networkpolicies` grant).
+
+| Rule | Severity | Source |
+|---|---|---|
+| `ServiceWithNoEndpoints` | critical | a selector-based Service has zero addresses (ready + not-ready) in its Endpoints object |
+| `EndpointAvailabilityDegraded` | warning | some addresses are `notReadyAddresses` - e.g. "5 desired pod(s), but only 3 healthy" |
+| `ClusterDNSDown` | critical | CoreDNS Deployment at 0 ready replicas - affects every Service-name lookup cluster-wide, not just one workload |
+| `IngressNotReady` | warning | an Ingress has no address in `status.loadBalancer.ingress` yet |
+| `LoadBalancerPending` | warning | a `type: LoadBalancer` Service has no external address assigned yet |
+
+**Service/Endpoint health needed no pod-selector matching at all** - an
+Endpoints object's own `addresses`/`notReadyAddresses` counts already
+say exactly what the plan doc's example asks for ("Service
+`payment-service` has 5 desired pods, but only 3 healthy endpoints are
+available"): Kubernetes itself already did the selector-matching work
+to populate that object, so this just reads the counts. Verified live:
+`EndpointAvailabilityDegraded` correctly (if briefly) fired on
+`cluster-monitor`'s own Service during this very deployment's rollout
+(1 old pod terminating + 1 new one not yet ready) and self-resolved the
+next cycle once the rollout finished - exactly the transient signal
+this check exists to catch.
+
+**Deliberately not built**: `ConnectionErrors` (already covered by the
+existing `Event:<reason>` catch-all plus Root Cause Analysis's
+connectivity-marker evidence - a dedicated rule would just duplicate
+that) and `NetworkLatency` (needs a live probe - ping/curl between
+pods, a service mesh, or synthetic monitoring - none of which exist in
+this lab or are derivable from the K8s API alone).
+
+**Ingress/LoadBalancer checks are implemented but inert on this lab** -
+no Ingress controller or cloud/MetalLB LoadBalancer provisioner is
+installed here, so `ingresses`/`type: LoadBalancer` Services simply
+don't exist to check. Both rules are still real and unit-tested
+(`tests/test_networking.py`) against synthetic data, and will apply the
+moment either is added.
+
 ## Architecture
 
 ```
@@ -437,11 +477,12 @@ needed for the test suite).
 Read-only, cluster-wide, on exactly what each analysis pass reads -
 `pods`, `nodes`, `events`, `metrics.k8s.io` nodes, `persistentvolumeclaims`/
 `persistentvolumes`, `nodes/proxy` (Storage Analysis - see the callout
-in `k8s/01-rbac.yaml`, broader than everything else here), and
+in `k8s/01-rbac.yaml`, broader than everything else here),
 `deployments`/`statefulsets`/`poddisruptionbudgets`/`networkpolicies`/
-`horizontalpodautoscalers` (Best Practices & Security). No write verbs
-on anything in the cluster - this app only ever observes and records to
-its own Postgres.
+`horizontalpodautoscalers` (Best Practices & Security), and
+`services`/`endpoints`/`ingresses` (Networking Analysis). No write
+verbs on anything in the cluster - this app only ever observes and
+records to its own Postgres.
 
 ## What's not built (yet)
 
@@ -460,7 +501,7 @@ Scoped out for this pass, per the plan doc's later phases and the "Top
   different data source (the API server's own `/metrics`)
 - **Recommendation Engine** (kubectl commands / runbook links per issue)
 - **AI Assistant** (Phase 4 in the doc)
-- **Networking Analysis, Cost Optimization, Kubernetes Events Analysis**
-  (the rest of the original wishlist beyond the "Top 5" - not yet
-  started; Trend & Prediction Analysis and Cluster-Level Analysis above
-  were the first two tackled after the Top 5)
+- **Cost Optimization, Kubernetes Events Analysis** (the rest of the
+  original wishlist beyond the "Top 5" - not yet started; Trend &
+  Prediction Analysis, Cluster-Level Analysis, and Networking Analysis
+  above were the first three tackled after the Top 5)

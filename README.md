@@ -138,8 +138,12 @@ wishlist:
       and Cluster Risk Analysis, built entirely on data other modules
       already collect - see
       [`cluster-monitor/README.md`](cluster-monitor/README.md#cluster-level-analysis-beyond-the-original-top-5)
-- [ ] Networking Analysis (Service/Endpoint health, DNS, Ingress/LB
-      health, connection errors)
+- [x] **Networking Analysis** - `cluster-monitor`'s
+      `ServiceWithNoEndpoints`/`EndpointAvailabilityDegraded`/
+      `ClusterDNSDown`/`IngressNotReady`/`LoadBalancerPending`, reading
+      Endpoints objects' own ready/not-ready counts directly (no
+      pod-selector matching needed) - see
+      [`cluster-monitor/README.md`](cluster-monitor/README.md#networking-analysis-beyond-the-original-top-5)
 - [ ] Cost Optimization (idle/underutilized nodes - most of the rest
       already overlaps with Resource Optimization above)
 - [ ] Kubernetes Events Analysis (a dedicated, filterable events view)

@@ -203,6 +203,18 @@ def list_hpas(autoscaling: client.AutoscalingV2Api) -> list[dict]:
     return autoscaling.list_horizontal_pod_autoscaler_for_all_namespaces().to_dict()["items"]
 
 
+def list_services(core: client.CoreV1Api) -> list[dict]:
+    return core.list_service_for_all_namespaces().to_dict()["items"]
+
+
+def list_endpoints(core: client.CoreV1Api) -> list[dict]:
+    return core.list_endpoints_for_all_namespaces().to_dict()["items"]
+
+
+def list_ingresses(networking: client.NetworkingV1Api) -> list[dict]:
+    return networking.list_ingress_for_all_namespaces().to_dict()["items"]
+
+
 def list_recent_warning_events(core: client.CoreV1Api, lookback_minutes: int = 30) -> list[dict]:
     """Warning-type Events from the last `lookback_minutes` - the direct
     source for things with no corresponding pod/node status field
