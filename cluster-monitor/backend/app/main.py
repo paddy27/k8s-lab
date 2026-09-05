@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app import best_practices, detector, k8s_client, storage
+from app import best_practices, detector, k8s_client, root_cause, storage
 from app.db import (
     Issue,
     SessionLocal,
@@ -37,9 +37,17 @@ STORAGE_SAMPLE_EVERY_N_CYCLES = 10
 
 _cycle_count = 0
 
+# Cached from the last detection cycle so /api/incidents (Root Cause
+# Analysis) can reuse already-fetched cluster state instead of hitting
+# the API server again on every request - it's already refreshed every
+# DETECTION_INTERVAL_SECONDS regardless of whether anyone's looking at it.
+_latest_pods: list[dict] = []
+_latest_deployments: list[dict] = []
+_latest_statefulsets: list[dict] = []
+
 
 async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -> None:
-    global _cycle_count
+    global _cycle_count, _latest_pods, _latest_deployments, _latest_statefulsets
     while True:
         try:
             pods = await asyncio.to_thread(k8s_client.list_pods, core)
@@ -54,6 +62,8 @@ async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -
             pdbs = await asyncio.to_thread(k8s_client.list_poddisruptionbudgets, policy)
             networkpolicies = await asyncio.to_thread(k8s_client.list_networkpolicies, networking)
             hpas = await asyncio.to_thread(k8s_client.list_hpas, autoscaling)
+
+            _latest_pods, _latest_deployments, _latest_statefulsets = pods, deployments, statefulsets
 
             db = SessionLocal()
             try:
@@ -145,6 +155,63 @@ def issues_summary(db: Session = Depends(get_db)):
             for rule in sorted({i.rule for i in active_issues})
         },
     }
+
+
+def _issue_row_to_evidence_dict(issue: Issue) -> dict:
+    """Like _serialize_issue, but keeps first_seen as a real datetime -
+    root_cause.py does date arithmetic (the rollout-correlation window)
+    on it, so it can't be pre-stringified the way the API-facing
+    serializer does."""
+    return {"rule": issue.rule, "message": issue.message, "first_seen": issue.first_seen}
+
+
+@app.get("/api/incidents")
+def list_incidents(db: Session = Depends(get_db)):
+    """Root Cause Analysis (Top 5 priority #5): one incident report per
+    pod currently failing in a way that actually warrants root-causing
+    (root_cause.INCIDENT_TRIGGER_RULES - CrashLoopBackOff/OOMKilled/
+    ImagePullBackOff, not just any severity="critical" issue: see that
+    constant's docstring for why PrivilegedContainer et al. don't
+    belong here). Computed fresh on every request from the current
+    Issue history + the last detection cycle's cached pod/workload
+    state (see _latest_pods et al.) rather than something the
+    background loop itself writes - this is a read-time report over
+    existing data, not new state to reconcile."""
+    active_incidents = (
+        db.query(Issue)
+        .filter(Issue.active == True, Issue.rule.in_(root_cause.INCIDENT_TRIGGER_RULES), Issue.resource_kind == "Pod")  # noqa: E712
+        .all()
+    )
+
+    pods_by_key = {(p["metadata"]["namespace"], p["metadata"]["name"]): p for p in _latest_pods}
+
+    incidents = []
+    seen = set()
+    for issue in active_incidents:
+        key = (issue.namespace, issue.resource_name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        related_issues = [
+            _issue_row_to_evidence_dict(i) for i in
+            db.query(Issue)
+            .filter(Issue.namespace == issue.namespace, Issue.resource_kind == "Pod", Issue.resource_name == issue.resource_name)
+            .all()
+        ]
+
+        pod = pods_by_key.get(key)
+        node_name = pod.get("spec", {}).get("node_name") if pod else None
+        node_issues = [
+            _issue_row_to_evidence_dict(i) for i in
+            db.query(Issue).filter(Issue.resource_kind == "Node", Issue.resource_name == node_name).all()
+        ] if node_name else []
+
+        workload = root_cause.workload_for_pod(pod, _latest_deployments, _latest_statefulsets) if pod else None
+
+        incidents.append(root_cause.analyze_incident(issue.namespace, issue.resource_name, related_issues, node_issues, workload))
+
+    return incidents
 
 
 @app.get("/api/cluster/summary")

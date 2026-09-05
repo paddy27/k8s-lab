@@ -177,6 +177,71 @@ server's `/metrics`, a materially different, more sensitive data source
 app reads. Worth a dedicated pass of its own rather than bolting onto
 this one.
 
+## Root Cause Analysis (Top 5 priority #5, final)
+
+`app/root_cause.py` + `GET /api/incidents`. The plan doc's example shows
+a timeline plus a root-cause probability breakdown (e.g. "Database
+Connectivity 70%"). Fabricating a confidence number with no real
+computation behind it would be dishonest - every other analysis module
+in this project ties its numbers to something real (VPA's own model, an
+actual linear fit, a literal RBAC-scoped count). This does the same:
+each category's "probability" is just its share of a small, fixed set
+of *real* correlating evidence found for that pod - normalized to add
+up to 100 so it reads the way the plan doc's example does, but every
+percentage point traces back to a specific, inspectable piece of
+evidence in the same response, and there's an explicit "no correlating
+signal found yet" case rather than ever forcing a distribution out of
+nothing.
+
+**What counts as an "incident"**: a pod with an active `CrashLoopBackOff`,
+`OOMKilled`, or `ImagePullBackOff` - not just any `severity="critical"`
+issue. That distinction mattered in practice: `PrivilegedContainer` and
+`DangerousCapabilities` (Best Practices & Security) are also critical,
+but they're static security-posture facts about by-design-privileged
+infra (`calico-node`, `kube-proxy`), not something actively failing.
+The first live version of this endpoint used severity alone and
+surfaced every CNI pod as an "incident" on an otherwise healthy cluster
+- fixed by scoping to `root_cause.INCIDENT_TRIGGER_RULES` instead (see
+its docstring).
+
+**The evidence rubric** (`_score_categories`) - fixed weights, no ML,
+same spirit as `_sizing_recommendation` in cluster-stats or
+`_scheduling_failure_causes` above:
+
+| Category | Evidence | Weight |
+|---|---|---|
+| Resource Limits (Memory) | `OOMKilled` on this pod | 3 |
+| Resource Limits (Memory) | node was under `HighMemoryUsage` | 1 |
+| Image/Registry Issue | `ImagePullBackOff` on this pod | 3 |
+| Network/Dependency Connectivity | a related issue's message mentions a connection failure (`connection refused`, `dial tcp`, `timed out`, ...) | 3 |
+| Recent Deployment Rollout | the owning Deployment/StatefulSet's `Progressing` condition updated in the hour *before* the incident started | 2 |
+| Node/Infrastructure | node was `NodeNotReady` | 3 |
+| Node/Infrastructure | node was under `DiskPressure` | 2 |
+| Application Error | `CrashLoopBackOff` with nothing else correlating | 1 (fallback) |
+
+The owning workload is found by matching each Deployment/StatefulSet's
+own `spec.selector` against the pod's labels - the same mechanism
+Kubernetes itself uses, deliberately not an owner-reference chain walk
+(a Deployment doesn't even directly own its pods - a ReplicaSet does),
+consistent with this project's existing preference for avoiding fragile
+owner matching. A rollout only counts as evidence if its timestamp
+precedes the incident's start within `ROLLOUT_CORRELATION_WINDOW` (1
+hour) - a rollout *after* the incident began can't have caused it, and
+one from days ago is unrelated; both are checked with real datetime
+arithmetic, not string matching.
+
+The timeline merges every issue ever recorded for that pod, every issue
+recorded for the node it ran on, and the rollout event (if one
+correlates), sorted chronologically - a real, inspectable history, not
+a narrative generated to look plausible.
+
+`/api/incidents` computes this fresh on every request from the current
+Issue history plus the last detection cycle's cached pod/workload state
+(`main.py`'s `_latest_pods` et al.) - a read-time report over existing
+data, not new state the background loop itself needs to write. No new
+RBAC needed - built entirely on data Storage Analysis and Best
+Practices & Security already fetch.
+
 ## Architecture
 
 ```

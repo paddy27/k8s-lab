@@ -93,9 +93,9 @@ workload health, and VPA/HPA recommendations:
 
 ### Roadmap: deeper analysis
 
-A larger set of analysis capabilities (cluster-level health, storage/PVC
-prediction, networking, scheduling, security, cost optimization, root
-cause analysis, and more) is being added incrementally, prioritized as:
+The "Top 5" analysis priorities, agreed up front to keep this from
+becoming one enormous change - all five are now built, each as its own
+complete increment (built, tested, deployed, documented separately):
 
 - [x] **Resource Optimization** - `cluster-stats`' `/api/optimization`,
       see [`cluster-stats/README.md`](cluster-stats/README.md#resource-optimization-apioptimization-build_resource_optimization)
@@ -115,10 +115,15 @@ cause analysis, and more) is being added incrementally, prioritized as:
       `HostNetwork`/etc. plus `MissingPDB`/`MissingHPA`/
       `MissingNetworkPolicy`/missing-probe checks, see
       [`cluster-monitor/README.md`](cluster-monitor/README.md#best-practices--security-top-5-priority-4)
-- [ ] Root Cause Analysis (correlating events, deployments, restarts, metrics)
+- [x] **Root Cause Analysis** - `cluster-monitor`'s `GET /api/incidents`:
+      a timeline plus an evidence-weighted (never fabricated)
+      root-cause breakdown for any actively failing pod, see
+      [`cluster-monitor/README.md`](cluster-monitor/README.md#root-cause-analysis-top-5-priority-5-final)
 
-Each one ships as its own complete increment - built, tested, deployed,
-and documented - rather than as one large change.
+The broader wishlist this was drawn from (cluster-level health,
+networking analysis, cost optimization, predictions/forecasting, a full
+dashboard restructure, and more) remains unbuilt beyond these five -
+revisit it if there's appetite for another round.
 
 ## The image pipeline
 
