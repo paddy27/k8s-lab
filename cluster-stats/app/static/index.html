@@ -85,6 +85,12 @@
   </section>
 
   <section>
+    <h2>Resource Optimization</h2>
+    <div class="cards" id="optimization-cards"></div>
+    <div class="rec-list" id="optimization-list" style="margin-top:12px"></div>
+  </section>
+
+  <section>
     <h2>Nodes</h2>
     <div class="tablewrap"><table id="nodes-table"><thead></thead><tbody></tbody></table></div>
   </section>
@@ -239,6 +245,46 @@ async function refreshRecommendations() {
   `).join("");
 }
 
+async function refreshOptimization() {
+  const opt = await getJSON(withQuery("api/optimization", { namespace: filters.namespace }));
+  const cards = [
+    { label: "CPU Over-Provisioned", value: opt.cpu_over_provisioned.length },
+    { label: "Memory Over-Provisioned", value: opt.memory_over_provisioned.length },
+    { label: "Under-Provisioned", value: opt.under_provisioned.length },
+    { label: "Practically Unused", value: opt.unused_resources.length },
+    {
+      label: "Est. Monthly Savings",
+      value: `$${opt.potential_savings.estimated_monthly_cost_usd}`,
+      sub: `${opt.potential_savings.cpu_cores} cores + ${opt.potential_savings.memory_gib} GiB reclaimable`,
+    },
+  ];
+  document.getElementById("optimization-cards").innerHTML = cards.map(c =>
+    `<div class="card"><div class="label">${c.label}</div><div class="value">${c.value}</div>${c.sub ? `<div class="sub">${c.sub}</div>` : ""}</div>`
+  ).join("");
+
+  const items = [
+    ...opt.cpu_over_provisioned.map(r => ({ ...r, kind: "CPU over-provisioned", severity: "info", dims: ["cpu"] })),
+    ...opt.memory_over_provisioned.map(r => ({ ...r, kind: "Memory over-provisioned", severity: "info", dims: ["mem"] })),
+    ...opt.under_provisioned.map(r => ({ ...r, kind: "Under-provisioned", severity: "warning", dims: ["cpu", "mem"] })),
+    ...opt.unused_resources.map(r => ({ ...r, kind: "Practically unused", severity: "info", dims: ["cpu", "mem"] })),
+  ];
+  const wrap = document.getElementById("optimization-list");
+  if (!items.length) {
+    wrap.innerHTML = `<div class="empty">No optimization opportunities detected - every container with VPA data is within a reasonable band of its recommendation.</div>`;
+    return;
+  }
+  wrap.innerHTML = items.map(r => {
+    const lines = [];
+    if (r.dims.includes("cpu")) lines.push(`CPU: ${fmtCpu(r.cpu_request_millicores)} requested → ${fmtCpu(r.cpu_recommended_millicores)} recommended`);
+    if (r.dims.includes("mem")) lines.push(`Mem: ${fmtBytes(r.memory_request_bytes)} requested → ${fmtBytes(r.memory_recommended_bytes)} recommended`);
+    return `
+    <div class="rec ${r.severity}">
+      <span class="rec-target">${pill(r.kind, "neutral")} ${r.namespace}/${r.target_kind}/${r.target_name} (${r.container})</span>
+      <span class="rec-message">${lines.join(" · ")}</span>
+    </div>`;
+  }).join("");
+}
+
 async function refreshWorkloads() {
   const workloads = await getJSON(withQuery("api/workloads", { namespace: filters.namespace }));
   renderTable("workloads-table", [
@@ -321,7 +367,7 @@ async function refreshAll() {
   try {
     const cluster = await getJSON("api/cluster/summary");
     renderCards(cluster);
-    await Promise.all([refreshNodes(), refreshNamespaces(), refreshRecommendations(), refreshWorkloads(), refreshPods(), refreshHpa(), refreshVpa()]);
+    await Promise.all([refreshNodes(), refreshNamespaces(), refreshRecommendations(), refreshOptimization(), refreshWorkloads(), refreshPods(), refreshHpa(), refreshVpa()]);
     status.textContent = `updated ${new Date().toLocaleTimeString()}`;
   } catch (e) {
     status.textContent = `error: ${e.message}`;

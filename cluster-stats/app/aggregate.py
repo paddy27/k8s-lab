@@ -344,6 +344,19 @@ def _template_container_requests(workload_obj: dict) -> dict[str, dict]:
     return result
 
 
+def _template_container_limits(workload_obj: dict) -> dict[str, dict]:
+    """Same shape as _template_container_requests, for .resources.limits."""
+    containers = workload_obj.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+    result = {}
+    for c in containers:
+        lims = c.get("resources", {}).get("limits", {})
+        result[c["name"]] = {
+            "cpu_limit_millicores": parse_cpu_millicores(lims.get("cpu")),
+            "memory_limit_bytes": parse_memory_bytes(lims.get("memory")),
+        }
+    return result
+
+
 def _sizing_recommendation(dimension: str, current: float, lower: float, upper: float, fmt) -> tuple[str, str] | None:
     """Returns (message, severity) if the current request is outside the
     VPA's [lower, upper] band, else None. 'severity' is "warning" for
@@ -437,3 +450,117 @@ def build_recommendations(
             })
 
     return recommendations
+
+
+# Resource Optimization ------------------------------------------------------
+#
+# Buckets every container that has both a template resource request and a
+# VPA recommendation into over-provisioned / under-provisioned / practically
+# unused, plus a full request-vs-recommended table and an estimated
+# cost-savings rollup.
+#
+# "Recommended" here is the VPA's own `target` - the VPA recommender already
+# models a container's historical usage distribution (that's its entire
+# job), so reusing it avoids standing up a second, fragile usage-tracking
+# pipeline (e.g. matching live pods back to an owning workload, which
+# build_recommendations above deliberately avoids for the same reason).
+# over/under-provisioned reuse the same lower_bound/upper_bound signal
+# _sizing_recommendation already treats as ground truth elsewhere in this
+# file, so a container flagged here agrees with what /api/recommendations
+# would already say about it - "unused" is the one new, stricter threshold
+# (10x over the target, not just outside the [lower, upper] band).
+#
+# Caveat worth keeping in mind: this is a recommendation based on the VPA's
+# modeled usage, not a literal time-averaged metric reading - see
+# cluster-stats/README.md.
+_UNUSED_RATIO = 10.0
+
+# Estimated, not billed: this lab has no cloud billing API to query, so
+# "potential savings" is cores/GiB reclaimed times a configurable blended
+# on-demand $/hour rate, purely to give the number a unit people intuitively
+# grasp. Override via OPTIMIZATION_CPU_HOURLY_RATE_USD /
+# OPTIMIZATION_MEM_HOURLY_RATE_PER_GIB_USD if a different rate better
+# reflects your own environment.
+DEFAULT_CPU_HOURLY_RATE_USD = 0.033
+DEFAULT_MEM_HOURLY_RATE_PER_GIB_USD = 0.004
+HOURS_PER_MONTH = 730
+
+
+def build_resource_optimization(
+    deployments: list[dict],
+    daemonsets: list[dict],
+    statefulsets: list[dict],
+    vpas: list[dict],
+    cpu_hourly_rate_usd: float = DEFAULT_CPU_HOURLY_RATE_USD,
+    mem_hourly_rate_per_gib_usd: float = DEFAULT_MEM_HOURLY_RATE_PER_GIB_USD,
+) -> dict:
+    workloads_by_key = {
+        (obj["metadata"]["namespace"], kind, obj["metadata"]["name"]): obj
+        for kind, objs in (("Deployment", deployments), ("DaemonSet", daemonsets), ("StatefulSet", statefulsets))
+        for obj in objs
+    }
+
+    rows = []
+    for vpa in summarize_vpas(vpas):
+        workload_obj = workloads_by_key.get((vpa["namespace"], vpa["target_kind"], vpa["target_name"]))
+        if workload_obj is None:
+            continue
+        template_requests = _template_container_requests(workload_obj)
+        template_limits = _template_container_limits(workload_obj)
+        for c in vpa["containers"]:
+            current = template_requests.get(c["container_name"])
+            limits = template_limits.get(c["container_name"], {})
+            target, lower, upper = c.get("target"), c.get("lower_bound"), c.get("upper_bound")
+            if current is None or target is None or lower is None or upper is None:
+                continue
+            rows.append({
+                "namespace": vpa["namespace"],
+                "target_kind": vpa["target_kind"],
+                "target_name": vpa["target_name"],
+                "container": c["container_name"],
+                "cpu_request_millicores": current["cpu_requested_millicores"],
+                "cpu_recommended_millicores": target["cpu_millicores"],
+                "cpu_lower_millicores": lower["cpu_millicores"],
+                "cpu_upper_millicores": upper["cpu_millicores"],
+                "cpu_limit_millicores": limits.get("cpu_limit_millicores", 0.0),
+                "memory_request_bytes": current["memory_requested_bytes"],
+                "memory_recommended_bytes": target["memory_bytes"],
+                "memory_lower_bytes": lower["memory_bytes"],
+                "memory_upper_bytes": upper["memory_bytes"],
+                "memory_limit_bytes": limits.get("memory_limit_bytes", 0),
+            })
+
+    cpu_over_provisioned = [r for r in rows if r["cpu_request_millicores"] > r["cpu_upper_millicores"] > 0]
+    memory_over_provisioned = [r for r in rows if r["memory_request_bytes"] > r["memory_upper_bytes"] > 0]
+    under_provisioned = [
+        r for r in rows
+        if (r["cpu_lower_millicores"] > 0 and r["cpu_request_millicores"] < r["cpu_lower_millicores"])
+        or (r["memory_lower_bytes"] > 0 and r["memory_request_bytes"] < r["memory_lower_bytes"])
+    ]
+    unused_resources = [
+        r for r in rows
+        if (r["cpu_recommended_millicores"] > 0 and r["cpu_request_millicores"] > r["cpu_recommended_millicores"] * _UNUSED_RATIO)
+        or (r["memory_recommended_bytes"] > 0 and r["memory_request_bytes"] > r["memory_recommended_bytes"] * _UNUSED_RATIO)
+    ]
+
+    cpu_cores_saved = sum(max(0.0, r["cpu_request_millicores"] - r["cpu_recommended_millicores"]) for r in rows) / 1000
+    memory_gib_saved = sum(max(0, r["memory_request_bytes"] - r["memory_recommended_bytes"]) for r in rows) / (1024 ** 3)
+    estimated_monthly_cost_usd = (
+        cpu_cores_saved * cpu_hourly_rate_usd * HOURS_PER_MONTH
+        + memory_gib_saved * mem_hourly_rate_per_gib_usd * HOURS_PER_MONTH
+    )
+
+    return {
+        "cpu_over_provisioned": cpu_over_provisioned,
+        "memory_over_provisioned": memory_over_provisioned,
+        "under_provisioned": under_provisioned,
+        "unused_resources": unused_resources,
+        "rows": rows,
+        "potential_savings": {
+            "cpu_cores": round(cpu_cores_saved, 2),
+            "memory_gib": round(memory_gib_saved, 2),
+            "estimated_monthly_cost_usd": round(estimated_monthly_cost_usd, 2),
+            "cpu_hourly_rate_usd": cpu_hourly_rate_usd,
+            "memory_hourly_rate_per_gib_usd": mem_hourly_rate_per_gib_usd,
+        },
+    }

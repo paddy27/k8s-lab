@@ -67,6 +67,7 @@ functions - no cluster or mocking needed.
 | `GET /api/autoscaling/hpa?namespace=` | HPA min/max/current/desired |
 | `GET /api/autoscaling/vpa?namespace=&only_with_data=` | VPA recommended CPU/mem (lowerBound/upperBound) per container |
 | `GET /api/recommendations?namespace=` | actionable suggestions derived from VPA + HPA state (see below) |
+| `GET /api/optimization?namespace=` | Resource Optimization report - over/under-provisioned and practically-unused containers, plus an estimated cost-savings rollup (see below) |
 
 `GET /` serves a single-page dashboard (`app/static/index.html`) over
 all of the above, auto-refreshing every 15s, with namespace and
@@ -94,6 +95,42 @@ what to do about it":
 
 Every recommendation carries a namespace/kind/name/container so the UI
 can point back at exactly what triggered it.
+
+## Resource Optimization (`/api/optimization`, `build_resource_optimization`)
+
+The first of the project's planned "Top 5" analysis priorities. Where
+`/api/recommendations` above flags individual containers as a flat list,
+this turns the same VPA/workload data into a dedicated report with
+explicit buckets and a savings rollup:
+
+- **CPU / Memory Over-Provisioned** - request is above the VPA's
+  `upperBound` (same signal `build_recommendations`' "info" case already
+  uses - a container flagged here agrees with what that endpoint says).
+- **Under-Provisioned** - request is below the VPA's `lowerBound` - real
+  risk of throttling/OOM, same signal as the existing "warning" case.
+- **Practically Unused** - request is 10x or more the VPA's `target`, a
+  much stricter bar than "over-provisioned" for the containers that are
+  barely using any of what they've reserved.
+- **Potential Savings** - sums `request - target` across every
+  over-provisioned/unused container (cores and GiB), then converts that to
+  a dollar figure using a configurable blended on-demand rate
+  (`OPTIMIZATION_CPU_HOURLY_RATE_USD` / `OPTIMIZATION_MEM_HOURLY_RATE_PER_GIB_USD`,
+  defaulting to $0.033/core-hr and $0.004/GiB-hr) x 730 hours/month.
+
+**On "actual usage"**: this app has no metrics-history pipeline of its
+own, so "recommended"/"actual usage" here is the VPA's own `target`
+recommendation, not a raw time-averaged metric. The VPA recommender
+already models each container's historical usage distribution - that
+*is* its job - so reusing it avoids a second, fragile usage-tracking
+mechanism (in particular, matching live pods back to an owning workload,
+which `build_recommendations` above already deliberately avoids for the
+same reason - see "Design decisions" below). Worth knowing if you're
+expecting a literal 30-day rolling average: it's the VPA's own
+usage-informed sizing estimate, and inherits VPA's own settling time (a
+freshly-created workload's recommendation needs a few minutes of observed
+usage before it means anything, same caveat as the VPA table above).
+Likewise, **potential savings is an estimate against a configurable rate,
+not a real cloud bill** - this lab has no billing API to query.
 
 ## Design decisions worth knowing about
 

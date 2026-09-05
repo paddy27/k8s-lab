@@ -2,6 +2,7 @@ import pytest
 
 from app.aggregate import (
     build_recommendations,
+    build_resource_optimization,
     parse_cpu_millicores,
     parse_memory_bytes,
     summarize_cluster,
@@ -324,3 +325,83 @@ def test_build_recommendations_no_hpa_warnings_when_healthy():
     recs = build_recommendations([], [], [], [], hpas)
 
     assert recs == []
+
+
+def _vpa_full(namespace, target_name, container_name, target_cpu, target_mem, lower_cpu, lower_mem, upper_cpu, upper_mem):
+    """Like _vpa_for, but with target distinct from lower/upper bound -
+    build_resource_optimization treats target as "recommended", separately
+    from the [lower, upper] band build_recommendations judges against."""
+    return {
+        "metadata": {"namespace": namespace, "name": f"{target_name}-auto"},
+        "spec": {
+            "targetRef": {"kind": "Deployment", "name": target_name},
+            "updatePolicy": {"updateMode": "Off"},
+        },
+        "status": {"recommendation": {"containerRecommendations": [{
+            "containerName": container_name,
+            "target": {"cpu": target_cpu, "memory": target_mem},
+            "lowerBound": {"cpu": lower_cpu, "memory": lower_mem},
+            "upperBound": {"cpu": upper_cpu, "memory": upper_mem},
+        }]}},
+    }
+
+
+def test_build_resource_optimization_flags_cpu_over_provisioned_and_computes_savings():
+    deployments = [_deployment_with_request("obs", "payment-api", "payment-api", "2", "128Mi")]
+    vpas = [_vpa_full("obs", "payment-api", "payment-api", "500m", "128Mi", "100m", "128Mi", "600m", "128Mi")]
+
+    report = build_resource_optimization(
+        deployments, [], [], vpas, cpu_hourly_rate_usd=0.10, mem_hourly_rate_per_gib_usd=0.01,
+    )
+
+    assert len(report["cpu_over_provisioned"]) == 1
+    assert report["cpu_over_provisioned"][0]["container"] == "payment-api"
+    assert report["memory_over_provisioned"] == []
+    assert report["under_provisioned"] == []
+    assert report["potential_savings"]["cpu_cores"] == pytest.approx(1.5)  # 2 cores requested - 0.5 recommended
+    assert report["potential_savings"]["memory_gib"] == pytest.approx(0.0)
+    assert report["potential_savings"]["estimated_monthly_cost_usd"] == pytest.approx(1.5 * 0.10 * 730)
+
+
+def test_build_resource_optimization_flags_under_provisioned():
+    deployments = [_deployment_with_request("obs", "backend", "backend", "10m", "16Mi")]
+    vpas = [_vpa_full("obs", "backend", "backend", "100m", "128Mi", "50m", "64Mi", "200m", "256Mi")]
+
+    report = build_resource_optimization(deployments, [], [], vpas)
+
+    assert len(report["under_provisioned"]) == 1
+    assert report["cpu_over_provisioned"] == []
+    assert report["unused_resources"] == []
+
+
+def test_build_resource_optimization_flags_practically_unused():
+    """Request is 20x the VPA's recommended target - not just "a bit
+    generous" (that's cpu_over_provisioned's job) but essentially idle."""
+    deployments = [_deployment_with_request("obs", "backend", "backend", "2000m", "128Mi")]
+    vpas = [_vpa_full("obs", "backend", "backend", "100m", "128Mi", "50m", "64Mi", "200m", "256Mi")]
+
+    report = build_resource_optimization(deployments, [], [], vpas)
+
+    assert len(report["unused_resources"]) == 1
+    assert report["unused_resources"][0]["container"] == "backend"
+
+
+def test_build_resource_optimization_silent_when_well_sized():
+    deployments = [_deployment_with_request("obs", "backend", "backend", "150m", "128Mi")]
+    vpas = [_vpa_full("obs", "backend", "backend", "150m", "128Mi", "50m", "64Mi", "200m", "256Mi")]
+
+    report = build_resource_optimization(deployments, [], [], vpas)
+
+    assert report["cpu_over_provisioned"] == []
+    assert report["memory_over_provisioned"] == []
+    assert report["under_provisioned"] == []
+    assert report["unused_resources"] == []
+    assert report["potential_savings"]["estimated_monthly_cost_usd"] == 0
+
+
+def test_build_resource_optimization_ignores_vpa_with_no_matching_workload():
+    vpas = [_vpa_full("obs", "ghost", "ghost", "100m", "128Mi", "50m", "64Mi", "200m", "256Mi")]
+
+    report = build_resource_optimization([], [], [], vpas)
+
+    assert report["rows"] == []

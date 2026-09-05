@@ -91,6 +91,22 @@ workload health, and VPA/HPA recommendations:
 
 ![cluster-monitor dashboard](docs/screenshots/cluster-monitor.png)
 
+### Roadmap: deeper analysis
+
+A larger set of analysis capabilities (cluster-level health, storage/PVC
+prediction, networking, scheduling, security, cost optimization, root
+cause analysis, and more) is being added incrementally, prioritized as:
+
+- [x] **Resource Optimization** - `cluster-stats`' `/api/optimization`,
+      see [`cluster-stats/README.md`](cluster-stats/README.md#resource-optimization-apioptimization-build_resource_optimization)
+- [ ] Scheduling Analysis (why pods are stuck `Pending`)
+- [ ] Storage / PVC Capacity Prediction
+- [ ] Best Practices & Security (misconfigured workloads)
+- [ ] Root Cause Analysis (correlating events, deployments, restarts, metrics)
+
+Each one ships as its own complete increment - built, tested, deployed,
+and documented - rather than as one large change.
+
 ## The image pipeline
 
 There's no public registry involved. Images are built **on
