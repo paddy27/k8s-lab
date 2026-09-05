@@ -120,10 +120,26 @@ complete increment (built, tested, deployed, documented separately):
       root-cause breakdown for any actively failing pod, see
       [`cluster-monitor/README.md`](cluster-monitor/README.md#root-cause-analysis-top-5-priority-5-final)
 
-The broader wishlist this was drawn from (cluster-level health,
-networking analysis, cost optimization, predictions/forecasting, a full
-dashboard restructure, and more) remains unbuilt beyond these five -
-revisit it if there's appetite for another round.
+**Beyond the Top 5**, continuing through the rest of the original
+wishlist:
+
+- [x] **Trend & Prediction Analysis** - `cluster-monitor`'s
+      `NodeCapacityExhaustionPredicted`/`MemoryGrowthPredicted`/
+      `DiskExhaustionPredicted`/`RestartTrendIncreasing` issues plus
+      `GET /api/predictions` (Cluster Capacity Forecast, Pod Growth
+      Trend), reusing Storage Analysis's own exhaustion-prediction math
+      - see [`cluster-monitor/README.md`](cluster-monitor/README.md#trend--prediction-analysis-beyond-the-original-top-5)
+- [ ] Cluster-Level Analysis (overall health score, control-plane/API
+      server/etcd health, capacity/risk rollup)
+- [ ] Networking Analysis (Service/Endpoint health, DNS, Ingress/LB
+      health, connection errors)
+- [ ] Cost Optimization (idle/underutilized nodes - most of the rest
+      already overlaps with Resource Optimization above)
+- [ ] Kubernetes Events Analysis (a dedicated, filterable events view)
+
+The full dashboard restructure from the original wishlist (a unified
+📊/💡/🔍/📈/🚨/📜 navigation) remains unbuilt regardless of how many of
+the above ship - revisit it once the remaining analysis pieces land.
 
 ## The image pipeline
 

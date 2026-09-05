@@ -242,6 +242,49 @@ data, not new state the background loop itself needs to write. No new
 RBAC needed - built entirely on data Storage Analysis and Best
 Practices & Security already fetch.
 
+## Trend & Prediction Analysis (beyond the original Top 5)
+
+`app/predictions.py` + two new tables (`node_usage_samples`,
+`cluster_snapshot_samples` in `app/db.py`). After the original "Top 5"
+shipped, this continued through the rest of the plan doc's wishlist -
+starting here because it reuses the *exact* linear-regression
+exhaustion model already built and unit-tested for Storage Analysis
+(`storage.predict_days_to_exhaustion`) rather than inventing a second
+one: "when will this node's CPU/memory/disk fill up" is the same math
+as "when will this PVC fill up", just against a different capacity
+ceiling.
+
+| Rule | Severity | Source |
+|---|---|---|
+| `NodeCapacityExhaustionPredicted` | critical ≤ 3 days, warning ≤ 14 | linear fit of node CPU usage vs. its allocatable capacity |
+| `MemoryGrowthPredicted` | critical ≤ 3 days, warning ≤ 14 | same, for node memory (`workingSetBytes`) |
+| `DiskExhaustionPredicted` | critical ≤ 3 days, warning ≤ 14 | same, for the node's root filesystem (kubelet's `stats/summary` node-level `fs` block - a *different* field from the per-PVC `volume` stats Storage Analysis reads, same endpoint) |
+| `RestartTrendIncreasing` | warning | cluster-wide total container restart count trending up ≥ 1/day |
+
+Node CPU/memory/disk usage comes from the exact same kubelet
+`stats/summary` call Storage Analysis already makes per node - refactored
+(`k8s_client.list_all_node_stats`, replacing the old
+`list_all_volume_stats`) so each node's kubelet is hit once per
+detection cycle for both purposes, not twice for data that was always
+in the same response.
+
+**Pod Growth Trend and Cluster Capacity Forecast are deliberately not
+issues** - exposed only via `GET /api/predictions`, not
+`/api/issues`. A growing pod count isn't inherently a problem (it might
+be entirely intentional scaling), and neither has a natural "this counts
+as failing" threshold the way a specific node approaching 100% CPU
+does - forcing either into a pass/fail issue would be a judgment this
+data doesn't actually support. `/api/predictions` reports the raw
+numbers (days-to-exhaustion, pods/day) - `null` when there isn't enough
+sampled history yet, never a guessed value standing in for "no signal."
+
+Sampled at the same ~5-minute cadence as PVC usage (`main.py`'s
+`STORAGE_SAMPLE_EVERY_N_CYCLES`, shared across all three sample tables
+now) and capped at 30 days of history, same reasoning as
+`PvcUsageSample`. No new RBAC - this is the same `nodes/proxy` grant
+Storage Analysis already has, just reading a different field of the
+same response.
+
 ## Architecture
 
 ```
@@ -351,9 +394,12 @@ Scoped out for this pass, per the plan doc's later phases and the "Top
   status/history is a materially different feature, not yet built.
 - **Namespace-level quotas** (ResourceQuota objects - distinct from the
   PVC capacity prediction Storage Analysis already covers)
-- **Root Cause Analysis** (Top 5 priority #5 - not yet started)
 - **Deprecated Kubernetes API detection** - see the callout in the
   Best Practices & Security section above for why this needs a
   different data source (the API server's own `/metrics`)
 - **Recommendation Engine** (kubectl commands / runbook links per issue)
 - **AI Assistant** (Phase 4 in the doc)
+- **Cluster-Level Analysis, Networking Analysis, Cost Optimization,
+  Kubernetes Events Analysis** (the rest of the original wishlist
+  beyond the "Top 5" - not yet started; Trend & Prediction Analysis
+  above was the first one tackled after the Top 5)

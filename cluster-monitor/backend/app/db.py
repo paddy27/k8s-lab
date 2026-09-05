@@ -60,6 +60,44 @@ class PvcUsageSample(Base):
 PVC_SAMPLE_RETENTION_DAYS = 30
 
 
+class NodeUsageSample(Base):
+    """One row per node per sampling cycle - CPU/memory/disk usage
+    alongside the capacity it should eventually be measured against, so
+    predictions.build_node_capacity_predictions never needs a second
+    join back to the live Node object to know what "full" means.
+    Sampled at the same cadence as PvcUsageSample (see
+    STORAGE_SAMPLE_EVERY_N_CYCLES in main.py, reused for both)."""
+    __tablename__ = "node_usage_samples"
+
+    id = Column(Integer, primary_key=True)
+    node_name = Column(String, nullable=False, index=True)
+    cpu_used_millicores = Column(BigInteger, nullable=False)
+    cpu_allocatable_millicores = Column(BigInteger, nullable=False)
+    memory_used_bytes = Column(BigInteger, nullable=False)
+    memory_allocatable_bytes = Column(BigInteger, nullable=False)
+    disk_used_bytes = Column(BigInteger, nullable=True)
+    disk_capacity_bytes = Column(BigInteger, nullable=True)
+    sampled_at = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class ClusterSnapshotSample(Base):
+    """One row per sampling cycle, cluster-wide - pod count and total
+    container restart count over time. No natural capacity ceiling for
+    either (unlike CPU/memory/disk), so these back a plain trend
+    (predictions.build_restart_trend_issues /
+    build_pod_growth_trend), not an exhaustion ETA."""
+    __tablename__ = "cluster_snapshot_samples"
+
+    id = Column(Integer, primary_key=True)
+    pod_count = Column(Integer, nullable=False)
+    total_restart_count = Column(Integer, nullable=False)
+    sampled_at = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+NODE_SAMPLE_RETENTION_DAYS = 30
+CLUSTER_SNAPSHOT_RETENTION_DAYS = 30
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 
@@ -151,3 +189,84 @@ def load_recent_pvc_samples(
     for r in rows:
         by_pvc.setdefault((r.namespace, r.pvc_name), []).append((r.sampled_at, r.used_bytes, r.capacity_bytes))
     return by_pvc
+
+
+def record_node_usage_samples(db: Session, node_resource_stats: list[dict]) -> None:
+    """node_resource_stats: k8s_client.list_all_node_stats' second
+    return value - one row per node whose kubelet actually responded
+    this cycle. A node whose proxy was unreachable simply gets no
+    sample, same gap-handling as PVC samples."""
+    now = datetime.now(timezone.utc)
+    for stat in node_resource_stats:
+        db.add(NodeUsageSample(
+            node_name=stat["node_name"],
+            cpu_used_millicores=round(stat["cpu_used_millicores"]),
+            cpu_allocatable_millicores=round(stat["cpu_allocatable_millicores"]),
+            memory_used_bytes=stat["memory_used_bytes"],
+            memory_allocatable_bytes=stat["memory_allocatable_bytes"],
+            disk_used_bytes=stat.get("disk_used_bytes"),
+            disk_capacity_bytes=stat.get("disk_capacity_bytes"),
+            sampled_at=now,
+        ))
+    db.commit()
+
+
+def prune_old_node_usage_samples(db: Session, retention_days: int = NODE_SAMPLE_RETENTION_DAYS) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    db.query(NodeUsageSample).filter(NodeUsageSample.sampled_at < cutoff).delete()
+    db.commit()
+
+
+def load_recent_node_samples(
+    db: Session, retention_days: int = NODE_SAMPLE_RETENTION_DAYS
+) -> dict[str, list[tuple[datetime, dict]]]:
+    """{node_name: [(sampled_at, stats_dict), ...]}, ascending by time -
+    predictions.build_node_capacity_predictions/
+    build_cluster_capacity_forecast's expected input shape."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    rows = (
+        db.query(NodeUsageSample)
+        .filter(NodeUsageSample.sampled_at >= cutoff)
+        .order_by(NodeUsageSample.sampled_at.asc())
+        .all()
+    )
+    by_node: dict[str, list[tuple[datetime, dict]]] = {}
+    for r in rows:
+        by_node.setdefault(r.node_name, []).append((r.sampled_at, {
+            "cpu_used_millicores": r.cpu_used_millicores,
+            "cpu_allocatable_millicores": r.cpu_allocatable_millicores,
+            "memory_used_bytes": r.memory_used_bytes,
+            "memory_allocatable_bytes": r.memory_allocatable_bytes,
+            "disk_used_bytes": r.disk_used_bytes,
+            "disk_capacity_bytes": r.disk_capacity_bytes,
+        }))
+    return by_node
+
+
+def record_cluster_snapshot_sample(db: Session, pod_count: int, total_restart_count: int) -> None:
+    db.add(ClusterSnapshotSample(
+        pod_count=pod_count, total_restart_count=total_restart_count, sampled_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+
+
+def prune_old_cluster_snapshot_samples(db: Session, retention_days: int = CLUSTER_SNAPSHOT_RETENTION_DAYS) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    db.query(ClusterSnapshotSample).filter(ClusterSnapshotSample.sampled_at < cutoff).delete()
+    db.commit()
+
+
+def load_recent_cluster_snapshots(
+    db: Session, retention_days: int = CLUSTER_SNAPSHOT_RETENTION_DAYS
+) -> list[tuple[datetime, int, int]]:
+    """[(sampled_at, pod_count, total_restart_count), ...], ascending by
+    time - predictions.build_restart_trend_issues/build_pod_growth_trend's
+    expected input shape (each picks the one column it needs)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    rows = (
+        db.query(ClusterSnapshotSample)
+        .filter(ClusterSnapshotSample.sampled_at >= cutoff)
+        .order_by(ClusterSnapshotSample.sampled_at.asc())
+        .all()
+    )
+    return [(r.sampled_at, r.pod_count, r.total_restart_count) for r in rows]

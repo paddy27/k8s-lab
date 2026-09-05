@@ -11,14 +11,20 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app import best_practices, detector, k8s_client, root_cause, storage
+from app import best_practices, detector, k8s_client, predictions, root_cause, storage
 from app.db import (
     Issue,
     SessionLocal,
     get_db,
     init_db,
+    load_recent_cluster_snapshots,
+    load_recent_node_samples,
     load_recent_pvc_samples,
+    prune_old_cluster_snapshot_samples,
+    prune_old_node_usage_samples,
     prune_old_pvc_usage_samples,
+    record_cluster_snapshot_sample,
+    record_node_usage_samples,
     record_pvc_usage_samples,
     reconcile_issues,
 )
@@ -29,10 +35,11 @@ logger = logging.getLogger("cluster-monitor")
 DETECTION_INTERVAL_SECONDS = 30
 EVENT_LOOKBACK_MINUTES = 30
 
-# PVC usage is sampled far less often than issues are detected - a volume
-# filling up over days/weeks doesn't need 30-second resolution, and the
-# pvc_usage_samples table would otherwise grow unbounded. ~10 cycles at
-# 30s/cycle is roughly every 5 minutes.
+# PVC/node/cluster usage history (Storage Analysis + Trend & Prediction
+# Analysis) is sampled far less often than issues are detected - a
+# volume/node filling up over days/weeks doesn't need 30-second
+# resolution, and these tables would otherwise grow unbounded. ~10
+# cycles at 30s/cycle is roughly every 5 minutes.
 STORAGE_SAMPLE_EVERY_N_CYCLES = 10
 
 _cycle_count = 0
@@ -56,7 +63,16 @@ async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -
             events = await asyncio.to_thread(k8s_client.list_recent_warning_events, core, EVENT_LOOKBACK_MINUTES)
             pvcs = await asyncio.to_thread(k8s_client.list_persistentvolumeclaims, core)
             pvs = await asyncio.to_thread(k8s_client.list_persistentvolumes, core)
-            volume_stats = await asyncio.to_thread(k8s_client.list_all_volume_stats, core, nodes)
+            allocatable_by_node = {
+                n["metadata"]["name"]: {
+                    "cpu_millicores": detector.parse_cpu_millicores(n.get("status", {}).get("allocatable", {}).get("cpu")),
+                    "memory_bytes": detector.parse_memory_bytes(n.get("status", {}).get("allocatable", {}).get("memory")),
+                }
+                for n in nodes
+            }
+            volume_stats, node_resource_stats = await asyncio.to_thread(
+                k8s_client.list_all_node_stats, core, nodes, allocatable_by_node,
+            )
             deployments = await asyncio.to_thread(k8s_client.list_deployments, apps)
             statefulsets = await asyncio.to_thread(k8s_client.list_statefulsets, apps)
             pdbs = await asyncio.to_thread(k8s_client.list_poddisruptionbudgets, policy)
@@ -70,12 +86,26 @@ async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -
                 if _cycle_count % STORAGE_SAMPLE_EVERY_N_CYCLES == 0:
                     record_pvc_usage_samples(db, volume_stats)
                     prune_old_pvc_usage_samples(db)
+                    record_node_usage_samples(db, node_resource_stats)
+                    prune_old_node_usage_samples(db)
+                    total_restarts = sum(
+                        cs.get("restart_count", 0)
+                        for p in pods
+                        for cs in (p.get("status", {}).get("container_statuses") or [])
+                    )
+                    record_cluster_snapshot_sample(db, pod_count=len(pods), total_restart_count=total_restarts)
+                    prune_old_cluster_snapshot_samples(db)
                 samples_by_pvc = load_recent_pvc_samples(db)
+                samples_by_node = load_recent_node_samples(db)
+                cluster_snapshots = load_recent_cluster_snapshots(db)
 
                 issues = detector.detect_all_issues(pods, nodes, node_metrics, events)
                 issues += storage.build_storage_issues(pvcs, pvs, pods, volume_stats, samples_by_pvc)
                 issues += best_practices.detect_all_best_practice_issues(
                     pods, deployments, statefulsets, pdbs, hpas, networkpolicies,
+                )
+                issues += predictions.build_all_prediction_issues(
+                    samples_by_node, [(t, r) for t, _, r in cluster_snapshots],
                 )
 
                 reconcile_issues(db, issues)
@@ -141,6 +171,23 @@ def list_issues(
         query = query.filter(Issue.severity == severity)
     rows = query.order_by(Issue.last_seen.desc()).limit(500).all()
     return [_serialize_issue(r) for r in rows]
+
+
+@app.get("/api/predictions")
+def get_predictions(db: Session = Depends(get_db)):
+    """Raw forecast numbers backing Trend & Prediction Analysis, for a
+    dashboard to chart directly - distinct from the NodeCapacityExhaustion
+    Predicted/MemoryGrowthPredicted/DiskExhaustionPredicted/
+    RestartTrendIncreasing issues in /api/issues, which are the
+    "act on this" view of the same underlying history. Cluster Capacity
+    Forecast and Pod Growth Trend have no natural pass/fail threshold,
+    so they're only ever exposed here, never as an issue."""
+    samples_by_node = load_recent_node_samples(db)
+    cluster_snapshots = load_recent_cluster_snapshots(db)
+    return {
+        "cluster_capacity_forecast": predictions.build_cluster_capacity_forecast(samples_by_node),
+        "pod_growth_trend": predictions.build_pod_growth_trend([(t, p) for t, p, _ in cluster_snapshots]),
+    }
 
 
 @app.get("/api/issues/summary")

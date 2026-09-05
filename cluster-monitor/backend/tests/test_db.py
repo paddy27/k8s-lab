@@ -6,11 +6,19 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import (
     Base,
+    ClusterSnapshotSample,
     Issue,
+    NodeUsageSample,
     PvcUsageSample,
+    load_recent_cluster_snapshots,
+    load_recent_node_samples,
     load_recent_pvc_samples,
+    prune_old_cluster_snapshot_samples,
+    prune_old_node_usage_samples,
     prune_old_pvc_usage_samples,
     reconcile_issues,
+    record_cluster_snapshot_sample,
+    record_node_usage_samples,
     record_pvc_usage_samples,
 )
 
@@ -136,3 +144,66 @@ def test_prune_old_pvc_usage_samples_removes_only_stale_rows(db):
     remaining = db.query(PvcUsageSample).all()
     assert len(remaining) == 1
     assert remaining[0].used_bytes == fresh.used_bytes and remaining[0].sampled_at == fresh.sampled_at
+
+
+def _node_stat(node_name="k8s-worker1", cpu_used=500, cpu_alloc=2000, mem_used=1024, mem_alloc=4096,
+               disk_used=None, disk_cap=None):
+    return {
+        "node_name": node_name, "cpu_used_millicores": cpu_used, "cpu_allocatable_millicores": cpu_alloc,
+        "memory_used_bytes": mem_used, "memory_allocatable_bytes": mem_alloc,
+        "disk_used_bytes": disk_used, "disk_capacity_bytes": disk_cap,
+    }
+
+
+def test_record_node_usage_samples_inserts_one_row_per_node(db):
+    record_node_usage_samples(db, [_node_stat("k8s-master"), _node_stat("k8s-worker1")])
+
+    assert db.query(NodeUsageSample).count() == 2
+
+
+def test_load_recent_node_samples_groups_by_node_ascending_by_time(db):
+    record_node_usage_samples(db, [_node_stat("k8s-worker1", cpu_used=100)])
+    record_node_usage_samples(db, [_node_stat("k8s-worker1", cpu_used=200)])
+
+    by_node = load_recent_node_samples(db)
+
+    [cpu_values] = [[s[1]["cpu_used_millicores"] for s in samples] for samples in by_node.values()]
+    assert cpu_values == [100, 200]
+
+
+def test_prune_old_node_usage_samples_removes_only_stale_rows(db):
+    fresh = NodeUsageSample(node_name="a", cpu_used_millicores=1, cpu_allocatable_millicores=10,
+                             memory_used_bytes=1, memory_allocatable_bytes=10, sampled_at=datetime.now(timezone.utc))
+    stale = NodeUsageSample(node_name="a", cpu_used_millicores=1, cpu_allocatable_millicores=10,
+                             memory_used_bytes=1, memory_allocatable_bytes=10,
+                             sampled_at=datetime.now(timezone.utc) - timedelta(days=60))
+    db.add_all([fresh, stale])
+    db.commit()
+
+    prune_old_node_usage_samples(db, retention_days=30)
+
+    assert db.query(NodeUsageSample).count() == 1
+
+
+def test_record_and_load_cluster_snapshot_samples_ascending_by_time(db):
+    record_cluster_snapshot_sample(db, pod_count=20, total_restart_count=3)
+    record_cluster_snapshot_sample(db, pod_count=22, total_restart_count=5)
+
+    snapshots = load_recent_cluster_snapshots(db)
+
+    pod_counts = [s[1] for s in snapshots]
+    restart_counts = [s[2] for s in snapshots]
+    assert pod_counts == [20, 22]
+    assert restart_counts == [3, 5]
+
+
+def test_prune_old_cluster_snapshot_samples_removes_only_stale_rows(db):
+    fresh = ClusterSnapshotSample(pod_count=1, total_restart_count=0, sampled_at=datetime.now(timezone.utc))
+    stale = ClusterSnapshotSample(pod_count=1, total_restart_count=0,
+                                   sampled_at=datetime.now(timezone.utc) - timedelta(days=60))
+    db.add_all([fresh, stale])
+    db.commit()
+
+    prune_old_cluster_snapshot_samples(db, retention_days=30)
+
+    assert db.query(ClusterSnapshotSample).count() == 1

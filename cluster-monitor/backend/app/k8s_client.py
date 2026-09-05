@@ -81,18 +81,19 @@ def list_persistentvolumes(core: client.CoreV1Api) -> list[dict]:
     return core.list_persistent_volume().to_dict()["items"]
 
 
-def list_node_volume_stats(core: client.CoreV1Api, node_name: str) -> list[dict]:
-    """Per-PVC used/capacity/available bytes for every PVC-backed volume
-    currently mounted on this node, from the kubelet's own stats/summary
-    endpoint - proxied through the API server (nodes/proxy RBAC, this app
-    never talks to a node directly). This is the *only* place real PVC
-    usage lives: PersistentVolumeClaim/PersistentVolume objects only ever
-    carry requested/bound capacity, never how much of it is used.
-
-    Empty list (not an exception) if this node's proxy is unreachable,
-    RBAC hasn't propagated yet, or the response can't be parsed - usage
-    data is layered on top of the PVC/PV objects' own status, not a hard
+def get_node_stats_summary(core: client.CoreV1Api, node_name: str) -> dict | None:
+    """Raw parsed JSON from the kubelet's own stats/summary endpoint -
+    proxied through the API server (nodes/proxy RBAC, this app never
+    talks to a node directly). None (not an exception) if this node's
+    proxy is unreachable, RBAC hasn't propagated yet, or the response
+    can't be parsed - every caller treats this data as a nice-to-have
+    layered on top of the actual API objects' own status, not a hard
     dependency for this app to run.
+
+    Shared by _volume_stats_from_summary (Storage Analysis) and
+    node_resource_stats_from_summary (Trend & Prediction Analysis) so
+    each node's kubelet is hit once per detection cycle, not twice, for
+    data that comes from the exact same endpoint either way.
 
     _preload_content=False is load-bearing, not cosmetic: the generated
     client has no declared response schema for an arbitrary proxy path,
@@ -107,10 +108,16 @@ def list_node_volume_stats(core: client.CoreV1Api, node_name: str) -> list[dict]
     double quotes` on the very first real response."""
     try:
         response = core.connect_get_node_proxy_with_path(node_name, "stats/summary", _preload_content=False)
-        data = json.loads(response.data)
+        return json.loads(response.data)
     except (client.ApiException, ValueError):
-        return []
+        return None
 
+
+def _volume_stats_from_summary(data: dict) -> list[dict]:
+    """Per-PVC used/capacity/available bytes for every PVC-backed volume
+    currently mounted on this node. This is the *only* place real PVC
+    usage lives: PersistentVolumeClaim/PersistentVolume objects only ever
+    carry requested/bound capacity, never how much of it is used."""
     stats = []
     for pod in data.get("pods", []) or []:
         pod_ref = pod.get("podRef", {})
@@ -130,11 +137,50 @@ def list_node_volume_stats(core: client.CoreV1Api, node_name: str) -> list[dict]
     return stats
 
 
-def list_all_volume_stats(core: client.CoreV1Api, nodes: list[dict]) -> list[dict]:
-    stats = []
+def _node_resource_stats_from_summary(node_name: str, data: dict, allocatable: dict) -> dict | None:
+    """Node-level CPU/memory/disk usage for Trend & Prediction Analysis -
+    the same stats/summary payload's top-level "node" block (distinct
+    from the per-pod "pods" list _volume_stats_from_summary reads).
+    allocatable: {"cpu_millicores":, "memory_bytes":} from the live Node
+    object (aggregate.py-style parsing), so a usage sample always
+    carries the capacity it should eventually be compared against."""
+    node_block = data.get("node") or {}
+    cpu, memory, fs = node_block.get("cpu") or {}, node_block.get("memory") or {}, node_block.get("fs") or {}
+    if not cpu or not memory:
+        return None
+    return {
+        "node_name": node_name,
+        "cpu_used_millicores": (cpu.get("usageNanoCores") or 0) / 1_000_000,
+        "cpu_allocatable_millicores": allocatable["cpu_millicores"],
+        "memory_used_bytes": memory.get("workingSetBytes") or memory.get("usageBytes") or 0,
+        "memory_allocatable_bytes": allocatable["memory_bytes"],
+        "disk_used_bytes": fs.get("usedBytes"),
+        "disk_capacity_bytes": fs.get("capacityBytes"),
+    }
+
+
+def list_all_node_stats(
+    core: client.CoreV1Api, nodes: list[dict], allocatable_by_node: dict[str, dict],
+) -> tuple[list[dict], list[dict]]:
+    """(volume_stats, node_resource_stats) - one stats/summary call per
+    node, shared between Storage Analysis (per-PVC usage) and Trend &
+    Prediction Analysis (node-level CPU/memory/disk usage), so a node
+    whose proxy is unreachable simply contributes nothing to either
+    rather than being fetched twice and failing twice.
+    allocatable_by_node: {node_name: {"cpu_millicores":, "memory_bytes":}}."""
+    volume_stats, node_resource_stats = [], []
     for node in nodes:
-        stats.extend(list_node_volume_stats(core, node["metadata"]["name"]))
-    return stats
+        name = node["metadata"]["name"]
+        data = get_node_stats_summary(core, name)
+        if data is None:
+            continue
+        volume_stats.extend(_volume_stats_from_summary(data))
+        allocatable = allocatable_by_node.get(name)
+        if allocatable:
+            info = _node_resource_stats_from_summary(name, data, allocatable)
+            if info:
+                node_resource_stats.append(info)
+    return volume_stats, node_resource_stats
 
 
 def list_deployments(apps: client.AppsV1Api) -> list[dict]:
