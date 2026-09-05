@@ -144,8 +144,13 @@ wishlist:
       Endpoints objects' own ready/not-ready counts directly (no
       pod-selector matching needed) - see
       [`cluster-monitor/README.md`](cluster-monitor/README.md#networking-analysis-beyond-the-original-top-5)
-- [ ] Cost Optimization (idle/underutilized nodes - most of the rest
-      already overlaps with Resource Optimization above)
+- [x] **Cost Optimization** - `cluster-stats`' `GET /api/cost-optimization`
+      (Idle/Underutilized Nodes, from data `/api/nodes` already
+      computes) - the rest of this tree (Over-Provisioned Pods,
+      Resource Waste, Estimated Savings, Unused PVCs) was already
+      covered by Resource Optimization and Storage Analysis above, so
+      wasn't duplicated - see
+      [`cluster-stats/README.md`](cluster-stats/README.md#cost-optimization-apicost-optimization-beyond-the-original-top-5)
 - [ ] Kubernetes Events Analysis (a dedicated, filterable events view)
 
 The full dashboard restructure from the original wishlist (a unified

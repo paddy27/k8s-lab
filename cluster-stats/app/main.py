@@ -184,6 +184,17 @@ async def optimization(namespace: Optional[str] = None):
     return result
 
 
+@app.get("/api/cost-optimization")
+async def cost_optimization():
+    """Idle/Underutilized Nodes (Cost Optimization, beyond the original
+    Top 5) - see aggregate.build_node_utilization_report's docstring for
+    why the rest of the plan doc's Cost Optimization tree isn't
+    duplicated here."""
+    client = app.state.client
+    n, m = await asyncio.gather(k8s_client.list_nodes(client), k8s_client.list_node_metrics(client))
+    return aggregate.build_node_utilization_report(aggregate.summarize_nodes(n, m))
+
+
 _STATIC_DIR = Path(__file__).parent / "static"
 
 

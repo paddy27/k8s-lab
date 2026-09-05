@@ -1,6 +1,7 @@
 import pytest
 
 from app.aggregate import (
+    build_node_utilization_report,
     build_recommendations,
     build_resource_optimization,
     parse_cpu_millicores,
@@ -405,3 +406,56 @@ def test_build_resource_optimization_ignores_vpa_with_no_matching_workload():
     report = build_resource_optimization([], [], [], vpas)
 
     assert report["rows"] == []
+
+
+def _node_summary(name, cpu_used_pct, memory_used_pct):
+    return {"name": name, "cpu_used_pct": cpu_used_pct, "memory_used_pct": memory_used_pct}
+
+
+def test_build_node_utilization_report_flags_idle_node():
+    nodes = [_node_summary("k8s-worker1", cpu_used_pct=2.0, memory_used_pct=5.0)]
+
+    report = build_node_utilization_report(nodes)
+
+    assert len(report["idle_nodes"]) == 1
+    assert report["idle_nodes"][0]["name"] == "k8s-worker1"
+    assert report["underutilized_nodes"] == []
+
+
+def test_build_node_utilization_report_flags_underutilized_not_idle():
+    nodes = [_node_summary("k8s-worker1", cpu_used_pct=20.0, memory_used_pct=25.0)]
+
+    report = build_node_utilization_report(nodes)
+
+    assert report["idle_nodes"] == []
+    assert len(report["underutilized_nodes"]) == 1
+
+
+def test_build_node_utilization_report_silent_for_well_utilized_node():
+    nodes = [_node_summary("k8s-worker1", cpu_used_pct=60.0, memory_used_pct=70.0)]
+
+    report = build_node_utilization_report(nodes)
+
+    assert report["idle_nodes"] == []
+    assert report["underutilized_nodes"] == []
+
+
+def test_build_node_utilization_report_requires_both_dimensions_low():
+    """High CPU but low memory (or vice versa) isn't idle/underutilized -
+    the node is doing real work on at least one dimension."""
+    nodes = [_node_summary("k8s-worker1", cpu_used_pct=80.0, memory_used_pct=5.0)]
+
+    report = build_node_utilization_report(nodes)
+
+    assert report["idle_nodes"] == []
+    assert report["underutilized_nodes"] == []
+
+
+def test_build_node_utilization_report_skips_nodes_with_unknown_pct():
+    """cpu_used_pct/memory_used_pct is None when allocatable is 0 - not
+    idle, just unclassifiable."""
+    nodes = [_node_summary("k8s-worker1", cpu_used_pct=None, memory_used_pct=None)]
+
+    report = build_node_utilization_report(nodes)
+
+    assert report == {"idle_nodes": [], "underutilized_nodes": []}

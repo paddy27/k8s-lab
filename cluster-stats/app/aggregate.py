@@ -564,3 +564,37 @@ def build_resource_optimization(
             "memory_hourly_rate_per_gib_usd": mem_hourly_rate_per_gib_usd,
         },
     }
+
+
+# Cost Optimization (beyond the original Top 5) ------------------------------
+#
+# Idle/Underutilized Nodes, from the exact same per-node CPU/memory usage
+# summarize_nodes already computes - no new data source, no new RBAC.
+# Plain fixed thresholds on cpu_used_pct/memory_used_pct, not a
+# statistical model.
+#
+# The rest of the plan doc's Cost Optimization tree is already covered
+# elsewhere and deliberately not duplicated here: Over-Provisioned Pods,
+# Resource Waste, and Estimated Cost Savings are this app's own
+# build_resource_optimization/"potential_savings" above; Unused PVCs is
+# cluster-monitor's Storage Analysis (UnusedPVC). Idle Load Balancers is
+# not built anywhere - the Kubernetes API exposes no traffic/connection
+# metrics for a Service at all, LoadBalancer or otherwise, idle or not;
+# that would need a service mesh or the cloud provider's own metrics,
+# neither of which exists in this lab.
+IDLE_NODE_THRESHOLD_PCT = 10.0
+UNDERUTILIZED_NODE_THRESHOLD_PCT = 30.0
+
+
+def build_node_utilization_report(nodes_summary: list[dict]) -> dict:
+    idle, underutilized = [], []
+    for n in nodes_summary:
+        cpu_pct, mem_pct = n.get("cpu_used_pct"), n.get("memory_used_pct")
+        if cpu_pct is None or mem_pct is None:
+            continue  # zero allocatable reported - nothing meaningful to classify
+        entry = {"name": n["name"], "cpu_used_pct": cpu_pct, "memory_used_pct": mem_pct}
+        if cpu_pct < IDLE_NODE_THRESHOLD_PCT and mem_pct < IDLE_NODE_THRESHOLD_PCT:
+            idle.append(entry)
+        elif cpu_pct < UNDERUTILIZED_NODE_THRESHOLD_PCT and mem_pct < UNDERUTILIZED_NODE_THRESHOLD_PCT:
+            underutilized.append(entry)
+    return {"idle_nodes": idle, "underutilized_nodes": underutilized}

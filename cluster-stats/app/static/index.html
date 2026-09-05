@@ -91,6 +91,11 @@
   </section>
 
   <section>
+    <h2>Cost Optimization - Idle / Underutilized Nodes</h2>
+    <div class="rec-list" id="cost-optimization-list"></div>
+  </section>
+
+  <section>
     <h2>Nodes</h2>
     <div class="tablewrap"><table id="nodes-table"><thead></thead><tbody></tbody></table></div>
   </section>
@@ -285,6 +290,25 @@ async function refreshOptimization() {
   }).join("");
 }
 
+async function refreshCostOptimization() {
+  const cost = await getJSON("api/cost-optimization");
+  const items = [
+    ...cost.idle_nodes.map(n => ({ ...n, kind: "Idle node", severity: "warning" })),
+    ...cost.underutilized_nodes.map(n => ({ ...n, kind: "Underutilized node", severity: "info" })),
+  ];
+  const wrap = document.getElementById("cost-optimization-list");
+  if (!items.length) {
+    wrap.innerHTML = `<div class="empty">No idle or underutilized nodes - every node is carrying a reasonable share of load.</div>`;
+    return;
+  }
+  wrap.innerHTML = items.map(n => `
+    <div class="rec ${n.severity}">
+      <span class="rec-target">${pill(n.kind, "neutral")} ${n.name}</span>
+      <span class="rec-message">CPU: ${n.cpu_used_pct}% · Memory: ${n.memory_used_pct}%</span>
+    </div>
+  `).join("");
+}
+
 async function refreshWorkloads() {
   const workloads = await getJSON(withQuery("api/workloads", { namespace: filters.namespace }));
   renderTable("workloads-table", [
@@ -367,7 +391,7 @@ async function refreshAll() {
   try {
     const cluster = await getJSON("api/cluster/summary");
     renderCards(cluster);
-    await Promise.all([refreshNodes(), refreshNamespaces(), refreshRecommendations(), refreshOptimization(), refreshWorkloads(), refreshPods(), refreshHpa(), refreshVpa()]);
+    await Promise.all([refreshNodes(), refreshNamespaces(), refreshRecommendations(), refreshOptimization(), refreshCostOptimization(), refreshWorkloads(), refreshPods(), refreshHpa(), refreshVpa()]);
     status.textContent = `updated ${new Date().toLocaleTimeString()}`;
   } catch (e) {
     status.textContent = `error: ${e.message}`;

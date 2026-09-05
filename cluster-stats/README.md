@@ -68,6 +68,7 @@ functions - no cluster or mocking needed.
 | `GET /api/autoscaling/vpa?namespace=&only_with_data=` | VPA recommended CPU/mem (lowerBound/upperBound) per container |
 | `GET /api/recommendations?namespace=` | actionable suggestions derived from VPA + HPA state (see below) |
 | `GET /api/optimization?namespace=` | Resource Optimization report - over/under-provisioned and practically-unused containers, plus an estimated cost-savings rollup (see below) |
+| `GET /api/cost-optimization` | Cost Optimization - idle/underutilized nodes (see below) |
 
 `GET /` serves a single-page dashboard (`app/static/index.html`) over
 all of the above, auto-refreshing every 15s, with namespace and
@@ -131,6 +132,28 @@ freshly-created workload's recommendation needs a few minutes of observed
 usage before it means anything, same caveat as the VPA table above).
 Likewise, **potential savings is an estimate against a configurable rate,
 not a real cloud bill** - this lab has no billing API to query.
+
+## Cost Optimization (`/api/cost-optimization`, beyond the original Top 5)
+
+Idle/Underutilized Nodes - from the exact same per-node CPU/memory usage
+`summarize_nodes` already computes for `/api/nodes`, no new data source
+or RBAC. A node counts as **idle** only when *both* CPU and memory are
+below 10% used, **underutilized** when both are below 30% - a node with
+idle CPU but real memory usage (small pods each holding their own base
+memory footprint, common in this lab) is correctly neither, since it's
+still doing real work. Verified live: this lab's 2 nodes sit at ~4% CPU
+but 41-61% memory, so neither is flagged - a node genuinely running
+real workloads shouldn't read as "idle" just because it isn't
+CPU-bound.
+
+The rest of the plan doc's Cost Optimization tree is deliberately not
+duplicated here: **Over-Provisioned Pods**, **Resource Waste**, and
+**Estimated Cost Savings** are this app's own Resource Optimization
+report above; **Unused PVCs** is `cluster-monitor`'s Storage Analysis
+(`UnusedPVC`). **Idle Load Balancers** isn't built anywhere - the
+Kubernetes API exposes no traffic/connection metrics for a Service at
+all, idle or not; that would need a service mesh or the cloud
+provider's own metrics, neither of which exists in this lab.
 
 ## Design decisions worth knowing about
 
