@@ -13,10 +13,15 @@ rather than the typed model objects. Keeps app/detector.py a pure
 function over plain data, exactly like the rest of this repo's apps -
 easy to unit test with plain fixtures, no client-library mocking.
 
-Only CoreV1Api + CustomObjectsApi (for metrics.k8s.io) so far - this is
-Phase 2 (pod/node/event issue detection). AppsV1Api (Deployment
-rollout status, ReplicaSet history) belongs to a later "Deployment
-Health" phase; add it back here when that's actually built, not before.
+CoreV1Api + CustomObjectsApi (metrics.k8s.io) cover Phase 2 (pod/node/
+event issue detection) and Storage Analysis. AppsV1Api/PolicyV1Api/
+NetworkingV1Api/AutoscalingV2Api were added for Best Practices & Security
+(Top 5 priority #4) - Deployment/StatefulSet replica counts and pod
+template labels, PodDisruptionBudget/HorizontalPodAutoscaler coverage
+matching, and NetworkPolicy presence. AppsV1Api's fuller use (rollout
+status, ReplicaSet history) still belongs to a later "Deployment Health"
+phase - only .spec.replicas and .spec.template.metadata.labels are read
+so far.
 """
 from __future__ import annotations
 
@@ -27,7 +32,10 @@ from datetime import datetime, timedelta, timezone
 from kubernetes import client, config
 
 
-def build_api_clients() -> tuple[client.CoreV1Api, client.CustomObjectsApi]:
+def build_api_clients() -> tuple[
+    client.CoreV1Api, client.CustomObjectsApi, client.AppsV1Api,
+    client.PolicyV1Api, client.NetworkingV1Api, client.AutoscalingV2Api,
+]:
     override_url = os.environ.get("K8S_API_URL")
     if override_url:
         cfg = client.Configuration()
@@ -37,7 +45,14 @@ def build_api_clients() -> tuple[client.CoreV1Api, client.CustomObjectsApi]:
         config.load_incluster_config()
         api_client = client.ApiClient()
 
-    return client.CoreV1Api(api_client), client.CustomObjectsApi(api_client)
+    return (
+        client.CoreV1Api(api_client),
+        client.CustomObjectsApi(api_client),
+        client.AppsV1Api(api_client),
+        client.PolicyV1Api(api_client),
+        client.NetworkingV1Api(api_client),
+        client.AutoscalingV2Api(api_client),
+    )
 
 
 def list_nodes(core: client.CoreV1Api) -> list[dict]:
@@ -120,6 +135,26 @@ def list_all_volume_stats(core: client.CoreV1Api, nodes: list[dict]) -> list[dic
     for node in nodes:
         stats.extend(list_node_volume_stats(core, node["metadata"]["name"]))
     return stats
+
+
+def list_deployments(apps: client.AppsV1Api) -> list[dict]:
+    return apps.list_deployment_for_all_namespaces().to_dict()["items"]
+
+
+def list_statefulsets(apps: client.AppsV1Api) -> list[dict]:
+    return apps.list_stateful_set_for_all_namespaces().to_dict()["items"]
+
+
+def list_poddisruptionbudgets(policy: client.PolicyV1Api) -> list[dict]:
+    return policy.list_pod_disruption_budget_for_all_namespaces().to_dict()["items"]
+
+
+def list_networkpolicies(networking: client.NetworkingV1Api) -> list[dict]:
+    return networking.list_network_policy_for_all_namespaces().to_dict()["items"]
+
+
+def list_hpas(autoscaling: client.AutoscalingV2Api) -> list[dict]:
+    return autoscaling.list_horizontal_pod_autoscaler_for_all_namespaces().to_dict()["items"]
 
 
 def list_recent_warning_events(core: client.CoreV1Api, lookback_minutes: int = 30) -> list[dict]:

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app import detector, k8s_client, storage
+from app import best_practices, detector, k8s_client, storage
 from app.db import (
     Issue,
     SessionLocal,
@@ -38,7 +38,7 @@ STORAGE_SAMPLE_EVERY_N_CYCLES = 10
 _cycle_count = 0
 
 
-async def _detection_loop(core, custom) -> None:
+async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -> None:
     global _cycle_count
     while True:
         try:
@@ -49,6 +49,11 @@ async def _detection_loop(core, custom) -> None:
             pvcs = await asyncio.to_thread(k8s_client.list_persistentvolumeclaims, core)
             pvs = await asyncio.to_thread(k8s_client.list_persistentvolumes, core)
             volume_stats = await asyncio.to_thread(k8s_client.list_all_volume_stats, core, nodes)
+            deployments = await asyncio.to_thread(k8s_client.list_deployments, apps)
+            statefulsets = await asyncio.to_thread(k8s_client.list_statefulsets, apps)
+            pdbs = await asyncio.to_thread(k8s_client.list_poddisruptionbudgets, policy)
+            networkpolicies = await asyncio.to_thread(k8s_client.list_networkpolicies, networking)
+            hpas = await asyncio.to_thread(k8s_client.list_hpas, autoscaling)
 
             db = SessionLocal()
             try:
@@ -59,6 +64,9 @@ async def _detection_loop(core, custom) -> None:
 
                 issues = detector.detect_all_issues(pods, nodes, node_metrics, events)
                 issues += storage.build_storage_issues(pvcs, pvs, pods, volume_stats, samples_by_pvc)
+                issues += best_practices.detect_all_best_practice_issues(
+                    pods, deployments, statefulsets, pdbs, hpas, networkpolicies,
+                )
 
                 reconcile_issues(db, issues)
             finally:
@@ -74,9 +82,11 @@ async def _detection_loop(core, custom) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    core, custom = k8s_client.build_api_clients()
+    core, custom, apps, policy, networking, autoscaling = k8s_client.build_api_clients()
     app.state.core, app.state.custom = core, custom
-    app.state.detection_task = asyncio.create_task(_detection_loop(core, custom))
+    app.state.detection_task = asyncio.create_task(
+        _detection_loop(core, custom, apps, policy, networking, autoscaling)
+    )
     yield
     app.state.detection_task.cancel()
 

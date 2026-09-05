@@ -110,7 +110,11 @@ cause analysis, and more) is being added incrementally, prioritized as:
       [`cluster-monitor/README.md`](cluster-monitor/README.md#storage-analysis-top-5-priority-3)
       for a real limitation found running it against this lab's own
       `hostPath`-backed StorageClass
-- [ ] Best Practices & Security (misconfigured workloads)
+- [x] **Best Practices & Security** - `cluster-monitor`'s
+      `PrivilegedContainer`/`RunningAsRoot`/`DangerousCapabilities`/
+      `HostNetwork`/etc. plus `MissingPDB`/`MissingHPA`/
+      `MissingNetworkPolicy`/missing-probe checks, see
+      [`cluster-monitor/README.md`](cluster-monitor/README.md#best-practices--security-top-5-priority-4)
 - [ ] Root Cause Analysis (correlating events, deployments, restarts, metrics)
 
 Each one ships as its own complete increment - built, tested, deployed,

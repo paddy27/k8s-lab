@@ -1,8 +1,10 @@
 # Read-only cluster-wide. Only what Phase 2 detection + Storage Analysis
-# actually read: pods, nodes, events, node metrics, PVCs/PVs, and the
-# nodes/proxy path (see below). No write verbs on anything - this app
-# only ever observes and records to its own Postgres, never touches a
-# cluster resource.
+# + Best Practices & Security actually read: pods, nodes, events, node
+# metrics, PVCs/PVs, the nodes/proxy path (see below), plus
+# Deployments/StatefulSets/PodDisruptionBudgets/NetworkPolicies/HPAs for
+# the static best-practice checks (replica counts, PDB/HPA/NetworkPolicy
+# coverage). No write verbs on anything - this app only ever observes
+# and records to its own Postgres, never touches a cluster resource.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -33,6 +35,18 @@ rules:
   - apiGroups: [""]
     resources: ["nodes/proxy"]
     verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

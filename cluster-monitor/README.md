@@ -56,6 +56,17 @@ generic `PendingPod`:
 | `PodAffinity` | warning | `"match pod affinity"` |
 | `PodAntiAffinity` | warning | `"anti-affinity"` |
 
+Plus one cross-pod check, `PodDistributionImbalance`
+(`detect_scheduling_distribution_issues`): every *running* replica of
+some workload landed on a single node - grouped by each pod's immediate
+controller (a Deployment's pods are owned by a ReplicaSet, not the
+Deployment itself - deliberately not resolved further up the owner
+chain, same reasoning `cluster-stats`' recommendation engine already
+documents for avoiding fragile owner matching). Only flagged with 3+
+replicas (2 replicas on one node isn't "imbalanced", it's just what 2
+replicas look like) and only on a cluster with more than one Ready node
+(nothing to spread across otherwise - not a misconfiguration to fix).
+
 ## Storage Analysis (Top 5 priority #3)
 
 `app/storage.py` + a new `pvc_usage_samples` table (`app/db.py`). The
@@ -106,16 +117,65 @@ catch-all - a dedicated rule would just duplicate it) and
 not enough signal to be worth a dedicated rule with only one
 StorageClass in this lab).
 
-Plus one cross-pod check, `PodDistributionImbalance`
-(`detect_scheduling_distribution_issues`): every *running* replica of
-some workload landed on a single node - grouped by each pod's immediate
-controller (a Deployment's pods are owned by a ReplicaSet, not the
-Deployment itself - deliberately not resolved further up the owner
-chain, same reasoning `cluster-stats`' recommendation engine already
-documents for avoiding fragile owner matching). Only flagged with 3+
-replicas (2 replicas on one node isn't "imbalanced", it's just what 2
-replicas look like) and only on a cluster with more than one Ready node
-(nothing to spread across otherwise - not a misconfiguration to fix).
+## Best Practices & Security (Top 5 priority #4)
+
+`app/best_practices.py` - pure static analysis over already-fetched
+cluster state (pods, Deployments/StatefulSets, PodDisruptionBudgets,
+HorizontalPodAutoscalers, NetworkPolicies). No new metrics or history
+needed here, unlike Storage/Scheduling above - just RBAC to read a few
+more object kinds.
+
+**Per-container security checks** (`detect_pod_security_issues`):
+
+| Rule | Severity | Checks |
+|---|---|---|
+| `PrivilegedContainer` | critical | `securityContext.privileged: true` |
+| `DangerousCapabilities` | critical | added Linux capability in a known-dangerous set (`SYS_ADMIN`, `NET_ADMIN`, `ALL`, ...) |
+| `RunningAsRoot` | warning | nothing rules out root: no `runAsNonRoot: true` and no non-zero `runAsUser`, checked pod-level then container-level override |
+| `HostNetwork` / `HostPID` / `HostIPC` | warning | shares the node's network/PID/IPC namespace |
+| `HostPathVolume` | warning | any volume mounts a `hostPath` |
+| `ImageSecurityIssues` | warning | no pinned tag, or `:latest` (registry:port prefixes handled correctly - see `_is_unpinned_image`) |
+| `ServiceAccountAnalysis` | info | default ServiceAccount, token automount not explicitly disabled |
+| `MissingResourceRequests` | warning | no `resources.requests` |
+| `MissingResourceLimits` | info | no `resources.limits` |
+| `MissingLivenessProbe` / `MissingReadinessProbe` | warning | probe absent |
+| `MissingStartupProbe` | info | absent - only actually needed for slow-starting containers |
+
+**Workload-level checks** (`detect_workload_best_practice_issues`, over
+Deployments + StatefulSets):
+
+| Rule | Severity | Checks |
+|---|---|---|
+| `SingleReplicaWorkload` | warning | `replicas == 1` |
+| `MissingPDB` | info | 2+ replicas, no PodDisruptionBudget's `matchLabels` selector matches its pod template labels |
+| `MissingHPA` | info | no HorizontalPodAutoscaler's `scaleTargetRef` points at it |
+
+Plus one namespace-level check, `MissingNetworkPolicy` (info) - a
+namespace with pods but zero NetworkPolicy objects, skipping
+`kube-system`/`kube-public`/`kube-node-lease`. One issue per namespace,
+not per pod.
+
+**A known, expected effect of running this against a real cluster**:
+infra components genuinely need what several of these rules flag.
+Calico needs `privileged` + `hostNetwork`; kube-proxy needs
+`hostNetwork` + `privileged`; several `kube-system`/add-on pods run as
+root and skip probes entirely. Verified live against this lab's own
+cluster: 143 active issues on first run, including 4
+`PrivilegedContainer` (all correctly `calico-node`/`kube-proxy`, exactly
+what a real scanner like kube-bench or Polaris would also flag for the
+same pods) and a realistic spread of `RunningAsRoot`/missing-probe/
+missing-PDB/missing-HPA findings elsewhere. That's not noise to
+suppress - a namespace exclude-list would just be a different, more
+arbitrary way of getting the same signal wrong, so there isn't one.
+
+**Deliberately not built this pass**: `DeprecatedKubernetesAPIs`. A real
+signal for this exists - the API server's own
+`apiserver_requested_deprecated_apis` metric, incremented whenever any
+client actually calls a deprecated API - but it means scraping the API
+server's `/metrics`, a materially different, more sensitive data source
+(a non-resource URL, not a typed API object) from everything else this
+app reads. Worth a dedicated pass of its own rather than bolting onto
+this one.
 
 ## Architecture
 
@@ -205,19 +265,30 @@ needed for the test suite).
 
 ## RBAC
 
-Read-only, cluster-wide, on exactly what detection reads: `pods`,
-`nodes`, `events`, and `metrics.k8s.io` nodes. No write verbs on
-anything in the cluster - this app only ever observes and records to
+Read-only, cluster-wide, on exactly what each analysis pass reads -
+`pods`, `nodes`, `events`, `metrics.k8s.io` nodes, `persistentvolumeclaims`/
+`persistentvolumes`, `nodes/proxy` (Storage Analysis - see the callout
+in `k8s/01-rbac.yaml`, broader than everything else here), and
+`deployments`/`statefulsets`/`poddisruptionbudgets`/`networkpolicies`/
+`horizontalpodautoscalers` (Best Practices & Security). No write verbs
+on anything in the cluster - this app only ever observes and records to
 its own Postgres.
 
 ## What's not built (yet)
 
-Scoped out for this pass, per the plan doc's later phases:
+Scoped out for this pass, per the plan doc's later phases and the "Top
+5" priorities (see the root README's roadmap):
 
 - **Health Score** - a single 0-100 rollup number
-- **Deployment Health** - rollout status, ReplicaSet history, desired
-  vs. available replicas (needs `AppsV1Api`, deliberately not wired up
-  yet - see the comment in `app/k8s_client.py`)
-- **Namespace-level quotas / PVC usage**
+- **Deployment Health (full)** - rollout status and ReplicaSet history.
+  `AppsV1Api` is wired up now (Best Practices & Security reads
+  `.spec.replicas`/`.spec.template.metadata.labels`), but rollout
+  status/history is a materially different feature, not yet built.
+- **Namespace-level quotas** (ResourceQuota objects - distinct from the
+  PVC capacity prediction Storage Analysis already covers)
+- **Root Cause Analysis** (Top 5 priority #5 - not yet started)
+- **Deprecated Kubernetes API detection** - see the callout in the
+  Best Practices & Security section above for why this needs a
+  different data source (the API server's own `/metrics`)
 - **Recommendation Engine** (kubectl commands / runbook links per issue)
 - **AI Assistant** (Phase 4 in the doc)
