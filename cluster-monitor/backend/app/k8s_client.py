@@ -215,11 +215,7 @@ def list_ingresses(networking: client.NetworkingV1Api) -> list[dict]:
     return networking.list_ingress_for_all_namespaces().to_dict()["items"]
 
 
-def list_recent_warning_events(core: client.CoreV1Api, lookback_minutes: int = 30) -> list[dict]:
-    """Warning-type Events from the last `lookback_minutes` - the direct
-    source for things with no corresponding pod/node status field
-    (FailedScheduling, FailedMount, FailedAttachVolume, ...)."""
-    events = core.list_event_for_all_namespaces(field_selector="type=Warning").to_dict()["items"]
+def _events_since(events: list[dict], lookback_minutes: int) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
     recent = []
     for e in events:
@@ -227,3 +223,20 @@ def list_recent_warning_events(core: client.CoreV1Api, lookback_minutes: int = 3
         if last_seen is not None and last_seen >= cutoff:
             recent.append(e)
     return recent
+
+
+def list_recent_warning_events(core: client.CoreV1Api, lookback_minutes: int = 30) -> list[dict]:
+    """Warning-type Events from the last `lookback_minutes` - the direct
+    source for things with no corresponding pod/node status field
+    (FailedScheduling, FailedMount, FailedAttachVolume, ...)."""
+    events = core.list_event_for_all_namespaces(field_selector="type=Warning").to_dict()["items"]
+    return _events_since(events, lookback_minutes)
+
+
+def list_recent_events(core: client.CoreV1Api, lookback_minutes: int = 60) -> list[dict]:
+    """Every Event - Normal and Warning - unlike
+    list_recent_warning_events above, which stays Warning-only since
+    that's all issue detection needs. This is the broader "browse
+    everything that happened" feed behind Kubernetes Events Analysis."""
+    events = core.list_event_for_all_namespaces().to_dict()["items"]
+    return _events_since(events, lookback_minutes)

@@ -151,11 +151,19 @@ wishlist:
       covered by Resource Optimization and Storage Analysis above, so
       wasn't duplicated - see
       [`cluster-stats/README.md`](cluster-stats/README.md#cost-optimization-apicost-optimization-beyond-the-original-top-5)
-- [ ] Kubernetes Events Analysis (a dedicated, filterable events view)
+- [x] **Kubernetes Events Analysis** - `cluster-monitor`'s
+      `GET /api/events`: a dedicated, filterable view over the raw
+      Normal+Warning event stream (namespace/kind/name/reason/severity/
+      time-range), deliberately separate from the reconciled "Issues"
+      abstraction everything else here builds - see
+      [`cluster-monitor/README.md`](cluster-monitor/README.md#kubernetes-events-analysis-beyond-the-original-top-5-final-item)
 
-The full dashboard restructure from the original wishlist (a unified
-📊/💡/🔍/📈/🚨/📜 navigation) remains unbuilt regardless of how many of
-the above ship - revisit it once the remaining analysis pieces land.
+**Every analysis area from the original wishlist is now built.** The
+one thing left unbuilt is the wishlist's proposed full dashboard
+restructure (a unified 📊/💡/🔍/📈/🚨/📜 navigation) - both apps'
+dashboards still show each analysis area as its own section rather
+than under that consolidated navigation; revisit if there's appetite
+for that UI pass.
 
 ## The image pipeline
 

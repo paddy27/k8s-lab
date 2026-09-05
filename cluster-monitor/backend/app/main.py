@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app import best_practices, cluster_health, detector, k8s_client, predictions, root_cause, storage
+from app import best_practices, cluster_health, detector, events_analysis, k8s_client, predictions, root_cause, storage
 from app import networking as networking_analysis  # avoids shadowing the NetworkingV1Api param named `networking` below
 from app.db import (
     Issue,
@@ -316,6 +316,35 @@ def cluster_health_endpoint(db: Session = Depends(get_db)):
         "resource_saturation": saturation,
         "control_plane_health": control_plane_health,
         "risk_factors": risk_factors,
+    }
+
+
+@app.get("/api/events")
+async def list_events(
+    namespace: Optional[str] = None,
+    kind: Optional[str] = None,
+    name: Optional[str] = None,
+    reason: Optional[str] = None,
+    severity: Optional[str] = None,
+    lookback_minutes: int = 60,
+):
+    """Kubernetes Events Analysis (beyond the original Top 5, final item
+    from the original wishlist) - a dedicated, filterable view over the
+    raw Event stream (Normal + Warning), distinct from the reconciled
+    "Issues" abstraction everything else in this app builds. Fetched
+    live per request, not cached from the detection loop - Normal-type
+    events aren't otherwise needed for issue detection at all, so
+    there's nothing to reuse from that cycle."""
+    events = await asyncio.to_thread(k8s_client.list_recent_events, app.state.core, lookback_minutes)
+    filtered = events_analysis.filter_events(events, namespace=namespace, kind=kind, name=name, reason=reason, severity=severity)
+    serialized = sorted(
+        (events_analysis.serialize_event(e) for e in filtered),
+        key=lambda e: e["last_seen"] or "",
+        reverse=True,
+    )
+    return {
+        "summary": events_analysis.summarize_events(filtered),
+        "events": serialized[:500],
     }
 
 

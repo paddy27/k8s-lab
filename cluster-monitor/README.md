@@ -386,6 +386,50 @@ don't exist to check. Both rules are still real and unit-tested
 (`tests/test_networking.py`) against synthetic data, and will apply the
 moment either is added.
 
+## Kubernetes Events Analysis (beyond the original Top 5, final item)
+
+`app/events_analysis.py` + `GET /api/events`. This is the last item from
+the original wishlist - a dedicated, filterable view over the *raw*
+Kubernetes Event stream, deliberately separate from everything else in
+this app. Every other module here builds "Issues": deduped, reconciled
+state with `first_seen`/`last_seen`/`resolved_at` that persists across
+detection cycles. This is the live event feed itself - Normal events
+included, nothing deduped or reconciled - matching the plan doc's ask
+for a distinct events view rather than folding everything into
+recommendations.
+
+```
+GET /api/events?namespace=&kind=&name=&reason=&severity=&lookback_minutes=60
+```
+
+Response: `{"summary": {"critical":, "warning":, "normal":, "top_reasons": [...]}, "events": [...]}`.
+`kind`/`name` filter by the event's `involvedObject` - `kind=Node` +
+a node name covers the wishlist's "Node" filter, any other
+`kind`/`name` (Pod, Deployment, ReplicaSet, ...) covers "Pod"/
+"Workload" the same way, without a separate code path per kind.
+`severity` reuses `detector.CRITICAL_EVENT_REASONS` - the *exact* same
+"is this actually severe or just routine" judgment the existing
+`Event:<reason>` issue detection already makes, so a Warning event that
+reads as "critical" here agrees with what would eventually become a
+critical issue if it persisted long enough to be reconciled.
+
+Fetched live per request (`k8s_client.list_recent_events`, a new
+Normal+Warning sibling to the existing Warning-only
+`list_recent_warning_events`), not cached from the detection loop -
+Normal-type events aren't otherwise needed for issue detection at all,
+so there's nothing from that cycle to reuse. No new RBAC - `events` was
+already granted for the existing Warning-only fetch.
+
+Verified live: correctly showed 0 critical / 5 warning / 54 normal
+right after this very deployment's v16 rollout, with `top_reasons`
+dominated by real rollout events (`ScalingReplicaSet`, `Pulled`,
+`Created`, `Started`) and the 5 warnings correctly identified as the
+pre-existing `cluster-stats` HPA metrics-server issues already visible
+in `/api/issues`. `severity=warning` filtering confirmed live too.
+
+This completes the original wishlist's full list of analysis areas
+(beyond the "Top 5") - see the root README's roadmap.
+
 ## Architecture
 
 ```
@@ -501,7 +545,9 @@ Scoped out for this pass, per the plan doc's later phases and the "Top
   different data source (the API server's own `/metrics`)
 - **Recommendation Engine** (kubectl commands / runbook links per issue)
 - **AI Assistant** (Phase 4 in the doc)
-- **Cost Optimization, Kubernetes Events Analysis** (the rest of the
-  original wishlist beyond the "Top 5" - not yet started; Trend &
-  Prediction Analysis, Cluster-Level Analysis, and Networking Analysis
-  above were the first three tackled after the Top 5)
+- Everything from the original wishlist is now built: the "Top 5"
+  above, plus Trend & Prediction Analysis, Cluster-Level Analysis,
+  Networking Analysis, and Kubernetes Events Analysis in this app, and
+  Cost Optimization in `cluster-stats`. What remains unbuilt is the
+  wishlist's proposed full dashboard restructure (a unified
+  📊/💡/🔍/📈/🚨/📜 navigation) - see the root README.
