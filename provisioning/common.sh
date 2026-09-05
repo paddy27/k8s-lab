@@ -13,6 +13,15 @@ echo "Provisioning $(hostname)"
 echo "Started : $(date)"
 echo "====================================="
 
+# NTP was inactive by default on this box, and VirtualBox's own guest-
+# time-sync isn't enough on its own: after a host pause/crash (this lab
+# has hit several - power management, host reboots), the guest's clock
+# can drift by hours with nothing correcting it. Confirmed the hard
+# way: kube-controller-manager intermittently got "Unauthorized" doing
+# FailedGetScale against the API server - classic mTLS clock-skew
+# symptom - traced to systemd-timesyncd being installed but disabled.
+systemctl enable --now systemd-timesyncd
+
 # Disable swap - kubelet refuses to start with swap on. swapoff+fstab
 # alone isn't enough on this box: the bento/ubuntu-22.04 image sets up
 # /swap.img via its own systemd unit (swap.img.swap), independent of
