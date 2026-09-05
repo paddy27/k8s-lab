@@ -94,7 +94,12 @@ would otherwise grow unbounded; `db.prune_old_pvc_usage_samples` caps
 history at 30 days). `predict_days_to_exhaustion` is an ordinary
 least-squares fit of used bytes over time - same "needs a few samples
 before it means anything" caveat as the VPA recommender elsewhere in
-this project, not a guess dressed up as a hard number.
+this project, not a guess dressed up as a hard number. It also refuses
+to fit anything spanning less than `MIN_TREND_WINDOW` (1 hour), not just
+"at least 2 samples" - found necessary the hard way once Trend &
+Prediction Analysis reused this same function for node CPU usage (see
+that section below): a short window is exactly when one noisy blip
+dominates the fit, and PVC usage is far smoother than instantaneous CPU.
 
 **A real limitation, found running this against the lab's own
 cluster**: this lab's only StorageClass is `local-path-provisioner`,
@@ -285,6 +290,62 @@ now) and capped at 30 days of history, same reasoning as
 Storage Analysis already has, just reading a different field of the
 same response.
 
+**A real false alarm, found running this against the lab's own
+cluster**: the very first live cycle produced `NodeCapacityExhaustionPredicted`
+"0.5 days" off just 3 samples spanning 7 minutes of ordinary CPU noise
+(56m → 42m → 87m on a nearly-idle node). Fixed at the source, in
+`storage.predict_days_to_exhaustion` itself (see that section above) -
+a minimum sample *count* wasn't a strong enough gate for a volatile
+metric like instantaneous CPU usage, so it now also refuses to
+extrapolate anything spanning less than an hour. Fixes every caller,
+not just this one.
+
+## Cluster-Level Analysis (beyond the original Top 5)
+
+`app/cluster_health.py` + `GET /api/cluster/health`. A top-level health
+rollup needing no new data source at all - every input already comes
+from something another module in this app fetches or computes every
+detection cycle:
+
+- **Control Plane / API Server / etcd / Scheduler / Controller Manager
+  Health** (`control_plane_pod_health`) - kubeadm's control-plane
+  components run as regular, if kubelet-managed static, Pods in
+  `kube-system` (same pods `detector.py`'s `PodDistributionImbalance`
+  note on `ownerReference: Node` already describes) - matched by the
+  well-known kubeadm naming convention (`etcd-<node>`,
+  `kube-apiserver-<node>`, ...) and reported ready/restart-count, same
+  as any other pod. Empty on a managed control plane (EKS, GKE, ...)
+  where these don't exist as pods at all - this check only applies
+  where they do.
+- **Cluster Capacity** (`compute_cluster_capacity`) - node
+  count/readiness and total allocatable CPU/memory, summed from the
+  same `Node` objects already fetched every cycle.
+- **Resource Saturation** (`compute_resource_saturation`) - current
+  cluster-wide CPU/memory usage as a % of allocatable, from the same
+  per-node usage figures Trend & Prediction Analysis already samples
+  this cycle (not stored history - "how saturated right now", trend is
+  that module's job).
+- **Overall Health Score** (`compute_health_score`) - starts at 100,
+  loses fixed, named points for: any Node not Ready (-20 each), any
+  control-plane component not Ready (-15 each), active issues
+  (-8/critical, -2/warning, capped at -50 total so a cluster with
+  hundreds of minor warnings doesn't bottom out on count alone), and
+  cluster-wide CPU or memory at ≥90% (-10 each). **This is a plain
+  weighted deduction, not a statistically validated model or a
+  fabricated confidence number** - every point lost is named in the
+  response's `deductions` list, same "no black box" principle as
+  Root Cause Analysis's evidence-weighted categories above.
+- **Cluster Risk Analysis** - `risk_factors` in the same response:
+  every active critical issue plus any active Trend & Prediction
+  Analysis issue (`NodeCapacityExhaustionPredicted`,
+  `MemoryGrowthPredicted`, `DiskExhaustionPredicted`,
+  `RestartTrendIncreasing`) - forward-looking risks surfaced here even
+  before they'd otherwise stand out in the plain Issues list.
+
+Uses the last detection cycle's cached state (`_latest_nodes` et al. in
+`main.py`), same pattern as `/api/incidents` - no new RBAC, no new K8s
+objects fetched.
+
 ## Architecture
 
 ```
@@ -399,7 +460,7 @@ Scoped out for this pass, per the plan doc's later phases and the "Top
   different data source (the API server's own `/metrics`)
 - **Recommendation Engine** (kubectl commands / runbook links per issue)
 - **AI Assistant** (Phase 4 in the doc)
-- **Cluster-Level Analysis, Networking Analysis, Cost Optimization,
-  Kubernetes Events Analysis** (the rest of the original wishlist
-  beyond the "Top 5" - not yet started; Trend & Prediction Analysis
-  above was the first one tackled after the Top 5)
+- **Networking Analysis, Cost Optimization, Kubernetes Events Analysis**
+  (the rest of the original wishlist beyond the "Top 5" - not yet
+  started; Trend & Prediction Analysis and Cluster-Level Analysis above
+  were the first two tackled after the Top 5)

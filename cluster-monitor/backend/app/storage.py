@@ -12,7 +12,7 @@ into a stored history, this module owns making sense of that history.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.detector import _issue
 
@@ -22,6 +22,16 @@ PVC_ALMOST_FULL_WARNING_PCT = 75.0
 # Only worth surfacing a prediction once it's close enough to matter -
 # a PVC on track to fill up in 90 days isn't yet an actionable issue.
 PVC_EXHAUSTION_WARNING_DAYS = 7.0
+
+# A minimum sample *count* alone isn't enough of a gate - confirmed the
+# hard way when this function was reused for node CPU usage
+# (predictions.py): 2-3 samples 5-7 minutes apart on a nearly-idle node
+# (CPU bouncing 56m -> 42m -> 87m, ordinary noise) extrapolated into a
+# "0.5 days to exhaustion" false alarm on the very first live run.
+# Requiring a minimum elapsed *time span* across the samples fixes this
+# for every caller, not just node CPU - a short window is exactly when a
+# single noisy blip dominates the fit; a longer one averages it out.
+MIN_TREND_WINDOW = timedelta(hours=1)
 
 
 def _fmt_bytes(b: float) -> str:
@@ -35,11 +45,14 @@ def _fmt_bytes(b: float) -> str:
 def predict_days_to_exhaustion(samples: list[tuple[datetime, int]], capacity_bytes: int) -> float | None:
     """Ordinary least-squares fit of used_bytes over time, extrapolated
     out to capacity_bytes. None when there isn't enough history yet
-    (fewer than 2 samples), usage isn't actually trending upward, or
-    capacity is unknown - same "needs time to build a picture" caveat as
-    the VPA recommender elsewhere in this project (cluster-stats), not a
-    guess dressed up as a hard number."""
+    (fewer than 2 samples, or samples spanning less than
+    MIN_TREND_WINDOW - see its comment), usage isn't actually trending
+    upward, or capacity is unknown - same "needs time to build a
+    picture" caveat as the VPA recommender elsewhere in this project
+    (cluster-stats), not a guess dressed up as a hard number."""
     if len(samples) < 2 or capacity_bytes <= 0:
+        return None
+    if samples[-1][0] - samples[0][0] < MIN_TREND_WINDOW:
         return None
 
     t0 = samples[0][0]

@@ -129,8 +129,15 @@ wishlist:
       `GET /api/predictions` (Cluster Capacity Forecast, Pod Growth
       Trend), reusing Storage Analysis's own exhaustion-prediction math
       - see [`cluster-monitor/README.md`](cluster-monitor/README.md#trend--prediction-analysis-beyond-the-original-top-5)
-- [ ] Cluster-Level Analysis (overall health score, control-plane/API
-      server/etcd health, capacity/risk rollup)
+      (including a real false-alarm-on-noisy-CPU-data bug found and
+      fixed at the source)
+- [x] **Cluster-Level Analysis** - `cluster-monitor`'s
+      `GET /api/cluster/health`: an evidence-weighted (never fabricated)
+      Overall Health Score, Control Plane/API Server/etcd/Scheduler/
+      Controller Manager Health, Cluster Capacity, Resource Saturation,
+      and Cluster Risk Analysis, built entirely on data other modules
+      already collect - see
+      [`cluster-monitor/README.md`](cluster-monitor/README.md#cluster-level-analysis-beyond-the-original-top-5)
 - [ ] Networking Analysis (Service/Endpoint health, DNS, Ingress/LB
       health, connection errors)
 - [ ] Cost Optimization (idle/underutilized nodes - most of the rest

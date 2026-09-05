@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app import best_practices, detector, k8s_client, predictions, root_cause, storage
+from app import best_practices, cluster_health, detector, k8s_client, predictions, root_cause, storage
 from app.db import (
     Issue,
     SessionLocal,
@@ -45,16 +45,19 @@ STORAGE_SAMPLE_EVERY_N_CYCLES = 10
 _cycle_count = 0
 
 # Cached from the last detection cycle so /api/incidents (Root Cause
-# Analysis) can reuse already-fetched cluster state instead of hitting
-# the API server again on every request - it's already refreshed every
+# Analysis) and /api/cluster/health (Cluster-Level Analysis) can reuse
+# already-fetched cluster state instead of hitting the API server again
+# on every request - it's already refreshed every
 # DETECTION_INTERVAL_SECONDS regardless of whether anyone's looking at it.
 _latest_pods: list[dict] = []
 _latest_deployments: list[dict] = []
 _latest_statefulsets: list[dict] = []
+_latest_nodes: list[dict] = []
+_latest_node_resource_stats: list[dict] = []
 
 
 async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -> None:
-    global _cycle_count, _latest_pods, _latest_deployments, _latest_statefulsets
+    global _cycle_count, _latest_pods, _latest_deployments, _latest_statefulsets, _latest_nodes, _latest_node_resource_stats
     while True:
         try:
             pods = await asyncio.to_thread(k8s_client.list_pods, core)
@@ -80,6 +83,7 @@ async def _detection_loop(core, custom, apps, policy, networking, autoscaling) -
             hpas = await asyncio.to_thread(k8s_client.list_hpas, autoscaling)
 
             _latest_pods, _latest_deployments, _latest_statefulsets = pods, deployments, statefulsets
+            _latest_nodes, _latest_node_resource_stats = nodes, node_resource_stats
 
             db = SessionLocal()
             try:
@@ -259,6 +263,55 @@ def list_incidents(db: Session = Depends(get_db)):
         incidents.append(root_cause.analyze_incident(issue.namespace, issue.resource_name, related_issues, node_issues, workload))
 
     return incidents
+
+
+# Risk factors worth surfacing in Cluster-Level Analysis alongside every
+# active critical issue: forward-looking predictions (Trend & Prediction
+# Analysis), which are only ever "warning"/"critical" but represent a
+# real risk even before they escalate.
+_RISK_FACTOR_PREDICTION_RULES = {
+    "NodeCapacityExhaustionPredicted", "MemoryGrowthPredicted", "DiskExhaustionPredicted", "RestartTrendIncreasing",
+}
+
+
+@app.get("/api/cluster/health")
+def cluster_health_endpoint(db: Session = Depends(get_db)):
+    """Cluster-Level Analysis: Overall Health Score, Control Plane/API
+    Server/etcd/Scheduler/Controller Manager Health, Cluster Capacity,
+    Resource Saturation, and Cluster Risk Analysis - all derived from
+    data this app already collects every detection cycle (see
+    app/cluster_health.py's module docstring for exactly what comes
+    from where, and why the health score is a plain weighted deduction,
+    never a fabricated confidence number). Uses the last detection
+    cycle's cached state (_latest_nodes et al.) rather than a fresh
+    fetch, same pattern as /api/incidents."""
+    active_issues = db.query(Issue).filter(Issue.active == True).all()  # noqa: E712
+    critical_count = sum(1 for i in active_issues if i.severity == "critical")
+    warning_count = sum(1 for i in active_issues if i.severity == "warning")
+
+    control_plane_health = cluster_health.control_plane_pod_health(_latest_pods)
+    saturation = cluster_health.compute_resource_saturation(_latest_nodes, _latest_node_resource_stats)
+    capacity = cluster_health.compute_cluster_capacity(_latest_nodes)
+    health = cluster_health.compute_health_score(
+        _latest_nodes, control_plane_health, saturation, critical_count, warning_count,
+    )
+
+    risk_factors = [
+        {
+            "rule": i.rule, "severity": i.severity, "namespace": i.namespace,
+            "resource_kind": i.resource_kind, "resource_name": i.resource_name, "message": i.message,
+        }
+        for i in sorted(active_issues, key=lambda i: (i.severity != "critical", i.rule))
+        if i.severity == "critical" or i.rule in _RISK_FACTOR_PREDICTION_RULES
+    ][:10]
+
+    return {
+        "health_score": health,
+        "cluster_capacity": capacity,
+        "resource_saturation": saturation,
+        "control_plane_health": control_plane_health,
+        "risk_factors": risk_factors,
+    }
 
 
 @app.get("/api/cluster/summary")

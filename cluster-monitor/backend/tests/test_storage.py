@@ -28,6 +28,22 @@ def test_predict_days_to_exhaustion_none_when_shrinking_or_flat():
     assert predict_days_to_exhaustion(shrinking, capacity_bytes=10 * gib) is None
 
 
+def test_predict_days_to_exhaustion_none_when_samples_span_too_short_a_window():
+    """Regression test: 3 samples 5-7 minutes apart on a nearly-idle
+    node (CPU bouncing 56m -> 42m -> 87m, ordinary noise) extrapolated
+    into a false "0.5 days to exhaustion" alarm on this exact real data
+    the first time predictions.py reused this function for node CPU.
+    A short window is exactly when one noisy blip dominates the fit."""
+    gib = 1024**3
+    noisy_short_window = [
+        (T0, 56 * gib // 1000),
+        (T0 + timedelta(minutes=5), 42 * gib // 1000),
+        (T0 + timedelta(minutes=7), 87 * gib // 1000),
+    ]
+
+    assert predict_days_to_exhaustion(noisy_short_window, capacity_bytes=2 * gib) is None
+
+
 def test_predict_days_to_exhaustion_none_with_insufficient_history():
     assert predict_days_to_exhaustion([], capacity_bytes=10 * 1024**3) is None
     assert predict_days_to_exhaustion([(T0, 1024)], capacity_bytes=10 * 1024**3) is None
