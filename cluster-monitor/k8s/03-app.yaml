@@ -20,7 +20,7 @@ spec:
       serviceAccountName: cluster-monitor
       containers:
         - name: cluster-monitor
-          image: 192.168.56.20:5000/cluster-monitor:v4
+          image: 192.168.56.20:5000/cluster-monitor:v6
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

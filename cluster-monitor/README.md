@@ -34,6 +34,39 @@ The event-based catch-all exists because some real problems
 (`FailedMount`, `FailedScheduling`) have no dedicated status field to
 poll - they only ever show up as Events.
 
+## Scheduling Analysis (Top 5 priority #2)
+
+`PendingPod` above just says *that* a pod is stuck - these root-cause
+*why*, straight from the scheduler's own `PodScheduled=False` condition
+message (`_pod_scheduled_failure_message` /
+`_scheduling_failure_causes` in `app/detector.py`) rather than
+re-deriving it: a message like `"0/2 nodes are available: 1
+Insufficient cpu, 1 Insufficient memory."` already names the cause, so
+this just pattern-matches the substrings the scheduler is known to use.
+A single message can name more than one cause - all matching ones are
+flagged, each as its own independently-trackable issue alongside the
+generic `PendingPod`:
+
+| Rule | Severity | Matched from the scheduler's message |
+|---|---|---|
+| `InsufficientCPU` | critical | `"insufficient cpu"` |
+| `InsufficientMemory` | critical | `"insufficient memory"` |
+| `TaintsAndTolerations` | warning | `"taint"` |
+| `NodeAffinity` | warning | `"node affinity"` / `"node selector"` |
+| `PodAffinity` | warning | `"match pod affinity"` |
+| `PodAntiAffinity` | warning | `"anti-affinity"` |
+
+Plus one cross-pod check, `PodDistributionImbalance`
+(`detect_scheduling_distribution_issues`): every *running* replica of
+some workload landed on a single node - grouped by each pod's immediate
+controller (a Deployment's pods are owned by a ReplicaSet, not the
+Deployment itself - deliberately not resolved further up the owner
+chain, same reasoning `cluster-stats`' recommendation engine already
+documents for avoiding fragile owner matching). Only flagged with 3+
+replicas (2 replicas on one node isn't "imbalanced", it's just what 2
+replicas look like) and only on a cluster with more than one Ready node
+(nothing to spread across otherwise - not a misconfiguration to fix).
+
 ## Architecture
 
 ```

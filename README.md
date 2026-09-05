@@ -99,7 +99,10 @@ cause analysis, and more) is being added incrementally, prioritized as:
 
 - [x] **Resource Optimization** - `cluster-stats`' `/api/optimization`,
       see [`cluster-stats/README.md`](cluster-stats/README.md#resource-optimization-apioptimization-build_resource_optimization)
-- [ ] Scheduling Analysis (why pods are stuck `Pending`)
+- [x] **Scheduling Analysis** - `cluster-monitor`'s root-caused `Pending`
+      detection (`InsufficientCPU`, `TaintsAndTolerations`, node/pod
+      affinity, ...) plus `PodDistributionImbalance`, see
+      [`cluster-monitor/README.md`](cluster-monitor/README.md#scheduling-analysis-top-5-priority-2)
 - [ ] Storage / PVC Capacity Prediction
 - [ ] Best Practices & Security (misconfigured workloads)
 - [ ] Root Cause Analysis (correlating events, deployments, restarts, metrics)

@@ -2,6 +2,7 @@ from app.detector import (
     detect_event_issues,
     detect_node_issues,
     detect_pod_issues,
+    detect_scheduling_distribution_issues,
 )
 
 
@@ -85,6 +86,57 @@ def test_detect_pod_issues_silent_for_healthy_pod():
     pods = [_pod("obs", "backend-1", container_statuses=[_container_status("backend", restart_count=0)])]
 
     assert detect_pod_issues(pods) == []
+
+
+def _pending_pod_with_scheduled_message(namespace, name, message):
+    pod = _pod(namespace, name, phase="Pending")
+    pod["status"]["conditions"] = [{"type": "PodScheduled", "status": "False", "reason": "Unschedulable", "message": message}]
+    return pod
+
+
+def test_detect_pod_issues_pending_names_insufficient_resource_causes():
+    """A single scheduler message can name more than one cause at once -
+    both should be flagged, alongside the generic PendingPod issue."""
+    pods = [_pending_pod_with_scheduled_message(
+        "obs", "backend-1", "0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient memory.",
+    )]
+
+    issues = detect_pod_issues(pods)
+
+    rules = {i["rule"] for i in issues}
+    assert rules == {"PendingPod", "InsufficientCPU", "InsufficientMemory"}
+    assert all(i["severity"] == "critical" for i in issues if i["rule"] in ("InsufficientCPU", "InsufficientMemory"))
+
+
+def test_detect_pod_issues_pending_names_taint_cause():
+    pods = [_pending_pod_with_scheduled_message(
+        "obs", "backend-1", "0/2 nodes are available: 2 node(s) had taint {dedicated: gpu}, that the pod didn't tolerate.",
+    )]
+
+    issues = detect_pod_issues(pods)
+
+    assert any(i["rule"] == "TaintsAndTolerations" for i in issues)
+
+
+def test_detect_pod_issues_pending_names_node_affinity_cause():
+    pods = [_pending_pod_with_scheduled_message(
+        "obs", "backend-1", "0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector.",
+    )]
+
+    issues = detect_pod_issues(pods)
+
+    assert any(i["rule"] == "NodeAffinity" for i in issues)
+
+
+def test_detect_pod_issues_pending_with_unrecognized_message_only_generic():
+    """The scheduler message doesn't match any known pattern - stay
+    silent on a specific cause rather than guessing; the generic
+    PendingPod issue still carries the visibility."""
+    pods = [_pending_pod_with_scheduled_message("obs", "backend-1", "something scheduling-related but novel")]
+
+    issues = detect_pod_issues(pods)
+
+    assert {i["rule"] for i in issues} == {"PendingPod"}
 
 
 def _node(name, ready="True", disk_pressure="False", memory_pressure="False", cpu="2", memory="2048Mi"):
@@ -172,3 +224,85 @@ def test_detect_event_issues_unknown_reason_defaults_to_warning():
     [issue] = detect_event_issues(events)
 
     assert issue["severity"] == "warning"
+
+
+def _running_pod_on_node(namespace, name, node_name, owner_kind="ReplicaSet", owner_name="backend-abc123"):
+    return {
+        "metadata": {
+            "namespace": namespace, "name": name,
+            "owner_references": [{"kind": owner_kind, "name": owner_name, "controller": True}],
+        },
+        "spec": {"node_name": node_name},
+        "status": {"phase": "Running"},
+    }
+
+
+def test_detect_scheduling_distribution_issues_flags_all_replicas_on_one_node():
+    pods = [_running_pod_on_node("obs", f"backend-{i}", "k8s-worker1") for i in range(3)]
+    nodes = [_node("k8s-worker1"), _node("k8s-worker2")]
+
+    [issue] = detect_scheduling_distribution_issues(pods, nodes)
+
+    assert issue["rule"] == "PodDistributionImbalance"
+    assert issue["resource_kind"] == "ReplicaSet"
+    assert issue["resource_name"] == "backend-abc123"
+    assert "k8s-worker1" in issue["message"]
+
+
+def test_detect_scheduling_distribution_issues_silent_when_spread_across_nodes():
+    pods = [
+        _running_pod_on_node("obs", "backend-1", "k8s-worker1"),
+        _running_pod_on_node("obs", "backend-2", "k8s-worker2"),
+        _running_pod_on_node("obs", "backend-3", "k8s-worker1"),
+    ]
+    nodes = [_node("k8s-worker1"), _node("k8s-worker2")]
+
+    assert detect_scheduling_distribution_issues(pods, nodes) == []
+
+
+def test_detect_scheduling_distribution_issues_silent_below_replica_threshold():
+    """Only 2 replicas on one node - not enough to call it "imbalanced",
+    that's just what 2 replicas look like."""
+    pods = [_running_pod_on_node("obs", f"backend-{i}", "k8s-worker1") for i in range(2)]
+    nodes = [_node("k8s-worker1"), _node("k8s-worker2")]
+
+    assert detect_scheduling_distribution_issues(pods, nodes) == []
+
+
+def _static_pod(namespace, name, node_name):
+    """A kubelet-managed static/mirror pod - owned by the Node itself,
+    not a workload controller (etcd, kube-apiserver, kube-scheduler,
+    kube-controller-manager all look like this on a kubeadm cluster)."""
+    return {
+        "metadata": {
+            "namespace": namespace, "name": name,
+            "owner_references": [{"kind": "Node", "name": node_name, "controller": True}],
+        },
+        "spec": {"node_name": node_name},
+        "status": {"phase": "Running"},
+    }
+
+
+def test_detect_scheduling_distribution_issues_ignores_static_control_plane_pods():
+    """Regression test: etcd/kube-apiserver/kube-scheduler/kube-controller-
+    manager all share an ownerReference of kind Node on their control-plane
+    node - that's 4 pods with an identical "owner", but they're 4 unrelated
+    single-instance components, not replicas of one workload, and their
+    placement isn't a scheduler decision at all. Must not be flagged."""
+    pods = [
+        _static_pod("kube-system", "etcd-k8s-master", "k8s-master"),
+        _static_pod("kube-system", "kube-apiserver-k8s-master", "k8s-master"),
+        _static_pod("kube-system", "kube-scheduler-k8s-master", "k8s-master"),
+        _static_pod("kube-system", "kube-controller-manager-k8s-master", "k8s-master"),
+    ]
+    nodes = [_node("k8s-master"), _node("k8s-worker1")]
+
+    assert detect_scheduling_distribution_issues(pods, nodes) == []
+
+
+def test_detect_scheduling_distribution_issues_silent_on_single_node_cluster():
+    """Nothing to spread across - not a misconfiguration to fix."""
+    pods = [_running_pod_on_node("obs", f"backend-{i}", "k8s-master") for i in range(3)]
+    nodes = [_node("k8s-master")]
+
+    assert detect_scheduling_distribution_issues(pods, nodes) == []

@@ -10,6 +10,11 @@ Covers the plan doc's Phase 2 list: CrashLoopBackOff, ImagePullBackOff,
 OOMKilled, high CPU/memory, NodeNotReady, disk pressure, pending pods -
 plus FrequentRestarts and an event-driven catch-all for things with no
 corresponding status field (FailedScheduling, FailedMount, ...).
+
+Also covers Scheduling Analysis (Top 5 priority #2): root-causing *why*
+a pod is Pending (insufficient CPU/memory, taints, node/pod affinity -
+see _SCHEDULING_FAILURE_CAUSES) and detecting Pod Distribution Imbalance
+(a workload's replicas all landing on one node).
 """
 from __future__ import annotations
 
@@ -69,6 +74,35 @@ def _issue(rule: str, severity: str, namespace: str | None, kind: str, name: str
     }
 
 
+# Scheduling Analysis: the scheduler's own PodScheduled=False condition
+# message already names the actual reason a Pending pod can't be placed
+# (e.g. "0/2 nodes are available: 1 Insufficient cpu, 1 Insufficient
+# memory.") - no separate inference needed, just pattern-match the
+# substrings it's known to use. A single message can name more than one
+# cause at once, so this returns every match, not just the first.
+_SCHEDULING_FAILURE_CAUSES = [
+    # (rule, severity, substrings to match against the lowercased message)
+    ("InsufficientCPU", "critical", ("insufficient cpu",)),
+    ("InsufficientMemory", "critical", ("insufficient memory",)),
+    ("PodAntiAffinity", "warning", ("anti-affinity",)),
+    ("NodeAffinity", "warning", ("node affinity", "node selector")),
+    ("PodAffinity", "warning", ("match pod affinity",)),
+    ("TaintsAndTolerations", "warning", ("taint",)),
+]
+
+
+def _pod_scheduled_failure_message(pod: dict) -> str | None:
+    for c in pod.get("status", {}).get("conditions") or []:
+        if c.get("type") == "PodScheduled" and c.get("status") == "False":
+            return c.get("message") or c.get("reason")
+    return None
+
+
+def _scheduling_failure_causes(message: str) -> list[tuple[str, str]]:
+    lowered = message.lower()
+    return [(rule, severity) for rule, severity, needles in _SCHEDULING_FAILURE_CAUSES if any(n in lowered for n in needles)]
+
+
 def detect_pod_issues(pods: list[dict]) -> list[dict]:
     issues = []
     for pod in pods:
@@ -81,6 +115,14 @@ def detect_pod_issues(pods: list[dict]) -> list[dict]:
                 "PendingPod", "warning", namespace, "Pod", name,
                 "Pod has been stuck in Pending - check for scheduling constraints or resource shortages.",
             ))
+            # Layer on the scheduler's actual reason, if it's told us one -
+            # each distinct cause gets its own rule/fingerprint so it can
+            # be tracked (and resolve) independently of the generic
+            # PendingPod issue above.
+            scheduled_message = _pod_scheduled_failure_message(pod)
+            if scheduled_message:
+                for rule, severity in _scheduling_failure_causes(scheduled_message):
+                    issues.append(_issue(rule, severity, namespace, "Pod", name, scheduled_message))
 
         for cs in pod.get("status", {}).get("container_statuses") or []:
             container = cs.get("name")
@@ -195,9 +237,80 @@ def detect_event_issues(events: list[dict]) -> list[dict]:
     return issues
 
 
+# Only worth asking "is this spread out?" once there are enough replicas
+# for "spread out" to mean anything - 1-2 replicas landing on the same
+# node isn't a distribution problem, it's just what 1-2 replicas look like.
+MIN_REPLICAS_FOR_DISTRIBUTION_CHECK = 3
+
+
+def _pod_controller_owner(pod: dict) -> tuple[str, str] | None:
+    """None for a static/mirror pod (kubelet-managed control-plane
+    components like etcd/kube-apiserver/kube-scheduler) - those carry an
+    ownerReference of kind "Node", which is real but not a workload:
+    every static pod on the same node shares that identical owner even
+    though they're unrelated single-instance components, and a static
+    pod's placement isn't a scheduler decision to begin with, so
+    "imbalance" doesn't apply to it. Confirmed the hard way: this exact
+    check is why the very first pass of this detector flagged etcd,
+    kube-apiserver, kube-scheduler, and kube-controller-manager together
+    as "4 replicas" all "imbalanced" onto k8s-master - they're not
+    replicas of anything, they're 4 different single-instance pods that
+    happen to share a Node owner."""
+    for ref in pod.get("metadata", {}).get("owner_references") or []:
+        if ref.get("controller") and ref.get("kind") != "Node":
+            return ref.get("kind"), ref.get("name")
+    return None
+
+
+def detect_scheduling_distribution_issues(pods: list[dict], nodes: list[dict]) -> list[dict]:
+    """"Pod Distribution Imbalance": every running replica of some
+    workload landed on a single node. Grouped by each pod's *immediate*
+    controller (a Deployment's pods are owned by a ReplicaSet, not the
+    Deployment itself) - deliberately not resolved further up to the
+    Deployment name, to avoid the same fragile owner-chain-walking
+    cluster-stats' recommendation engine already avoids.
+
+    Only flagged when the cluster actually has more than one Ready node -
+    on a single-node cluster this isn't a misconfiguration to fix, it's
+    just what one node looks like."""
+    ready_nodes = {
+        n["metadata"]["name"] for n in nodes
+        if {c["type"]: c["status"] for c in n.get("status", {}).get("conditions", [])}.get("Ready") == "True"
+    }
+    if len(ready_nodes) < 2:
+        return []
+
+    groups: dict[tuple, dict] = {}
+    for pod in pods:
+        if pod.get("status", {}).get("phase") != "Running":
+            continue
+        node_name = pod.get("spec", {}).get("node_name")
+        owner = _pod_controller_owner(pod)
+        if not node_name or owner is None:
+            continue
+        key = (pod["metadata"]["namespace"], *owner)
+        entry = groups.setdefault(key, {"pod_count": 0, "nodes": set()})
+        entry["pod_count"] += 1
+        entry["nodes"].add(node_name)
+
+    issues = []
+    for (namespace, owner_kind, owner_name), entry in groups.items():
+        if entry["pod_count"] < MIN_REPLICAS_FOR_DISTRIBUTION_CHECK or len(entry["nodes"]) != 1:
+            continue
+        [only_node] = entry["nodes"]
+        issues.append(_issue(
+            "PodDistributionImbalance", "warning", namespace, owner_kind, owner_name,
+            f"All {entry['pod_count']} running replicas are scheduled on the same node "
+            f"({only_node}) - if that node goes down, every replica goes down with it. "
+            "Consider a podAntiAffinity or topologySpreadConstraints rule.",
+        ))
+    return issues
+
+
 def detect_all_issues(pods: list[dict], nodes: list[dict], node_metrics: list[dict], events: list[dict]) -> list[dict]:
     return [
         *detect_pod_issues(pods),
         *detect_node_issues(nodes, node_metrics),
         *detect_event_issues(events),
+        *detect_scheduling_distribution_issues(pods, nodes),
     ]
