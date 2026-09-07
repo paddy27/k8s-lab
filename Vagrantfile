@@ -32,7 +32,9 @@ Vagrant.configure("2") do |config|
     },
     "llm" => {
       ip: "192.168.56.30",
-      memory: 8192, # Qwen3 4B (Q4_K_M, ~2.5GB) + Ollama + KV-cache headroom
+      memory: 8192, # qwen2.5:3b-instruct (Q4, ~2GB) + Ollama + KV-cache headroom -
+                    # started at qwen3:4b, moved off it after real testing found
+                    # its thinking mode unreliable, see ai-agent/README.md
       cpus: 4
     }
   }
@@ -110,6 +112,15 @@ Vagrant.configure("2") do |config|
 
         node.vm.provision "shell",
           path: "provisioning/monitoring.sh"
+
+      when "llm"
+
+        node.vm.synced_folder "./ai-agent",
+                              "/ai-agent",
+                              create: true
+
+        node.vm.provision "shell",
+          path: "provisioning/llm.sh"
 
       end
 

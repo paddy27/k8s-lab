@@ -13,6 +13,7 @@ it. `vagrant up` alone reproduces the whole thing from nothing.
 | `k8s-worker1` | `192.168.56.11` | worker node |
 | `buildserver` | `192.168.56.20` | Docker registry (`:5000`) + build tools (Docker, Ansible, Helm, JDK) |
 | `monitoring` | `192.168.56.21` | Prometheus (`:9090`) + Grafana (`:3000`), watching the cluster from outside it |
+| `llm` | `192.168.56.30` | Ollama (`:11434`, CPU-only - no GPU passthrough to a VirtualBox Linux guest) running `qwen2.5:3b-instruct`, for [`ai-agent/`](ai-agent/) |
 
 ## Quickstart
 
@@ -242,6 +243,7 @@ k8s-manifests/            # observability-platform's k8s manifests + deploy docs
 cluster-stats/             # the cluster-stats app (source + its own k8s manifests)
 cluster-monitor/            # the cluster-monitor app (source + its own k8s manifests)
 gateway/                     # nginx reverse proxy fronting cluster-stats + cluster-monitor
+ai-agent/                     # local, CPU-only, read-only LLM agent - see ai-agent/README.md
 observability-platform/    # git submodule -> github.com/paddy27/observability-platform
 deploy-image.sh            # generic build -> push -> pre-pull pipeline, used by every app
 shared_folder/              # synced into every VM; also where the join token/admin.conf land (gitignored)
