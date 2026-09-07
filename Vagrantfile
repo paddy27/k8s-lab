@@ -29,6 +29,11 @@ Vagrant.configure("2") do |config|
       ip: "192.168.56.21",
       memory: 1536, # prometheus + grafana need more than 512MB
       cpus: 1
+    },
+    "llm" => {
+      ip: "192.168.56.30",
+      memory: 8192, # Qwen3 4B (Q4_K_M, ~2.5GB) + Ollama + KV-cache headroom
+      cpus: 4
     }
   }
 
