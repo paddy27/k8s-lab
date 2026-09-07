@@ -83,9 +83,12 @@ NodePort.
 ### Screenshots
 
 **cluster-stats** (`/stats/`) - cluster/namespace/node resources,
-workload health, and VPA/HPA recommendations:
+workload health, and VPA/HPA recommendations (see
+[`cluster-stats/README.md`](cluster-stats/README.md#screenshots) for
+every section captured individually - Resource/Cost Optimization,
+Nodes, Namespaces, Workloads, HPA, VPA, Pods):
 
-![cluster-stats dashboard](docs/screenshots/cluster-stats.png)
+![cluster-stats dashboard](docs/screenshots/cluster-stats-overview.png)
 
 **cluster-monitor** (`/monitor/`) - detected issues, live:
 

@@ -10,7 +10,11 @@ Talks to the Kubernetes API server directly (not Prometheus) via a
 scoped ServiceAccount, so it stays accurate even if the monitoring
 stack on the `monitoring` VM is down.
 
-![cluster-stats dashboard](../docs/screenshots/cluster-stats.png)
+![cluster-stats dashboard](../docs/screenshots/cluster-stats-overview.png)
+
+*(a single full-page screenshot compresses every section down to
+unreadable text - see [Screenshots](#screenshots) below for each
+section captured on its own, at full resolution)*
 
 `k8s/03-hpa.yaml` gives the app its own real HPA (CPU-based, 1-3
 replicas) - there were previously zero HPAs anywhere in the cluster,
@@ -154,6 +158,50 @@ report above; **Unused PVCs** is `cluster-monitor`'s Storage Analysis
 Kubernetes API exposes no traffic/connection metrics for a Service at
 all, idle or not; that would need a service mesh or the cloud
 provider's own metrics, neither of which exists in this lab.
+
+## Screenshots
+
+Captured per-section (each `<section>` on the dashboard screenshotted
+on its own) rather than as one full-page image - a single screenshot
+tall enough to fit every table ends up compressed to the point of
+being unreadable in a rendered README.
+
+**Cluster overview + Recommendations** (VPA-flagged sizing issues):
+
+![Cluster cards + Recommendations](../docs/screenshots/cluster-stats-overview.png)
+![Recommendations, continued](../docs/screenshots/cluster-stats-recommendations.png)
+
+**Resource Optimization** (over/under-provisioned + estimated savings):
+
+![Resource Optimization](../docs/screenshots/cluster-stats-resource-optimization.png)
+
+**Cost Optimization** (idle/underutilized nodes):
+
+![Cost Optimization](../docs/screenshots/cluster-stats-cost-optimization.png)
+
+**Nodes**:
+
+![Nodes](../docs/screenshots/cluster-stats-nodes.png)
+
+**Namespaces**:
+
+![Namespaces](../docs/screenshots/cluster-stats-namespaces.png)
+
+**Workloads** (Deployments, DaemonSets, StatefulSets):
+
+![Workloads](../docs/screenshots/cluster-stats-workloads.png)
+
+**HPA**:
+
+![HPA](../docs/screenshots/cluster-stats-hpa.png)
+
+**VPA Recommendations** (raw min-max data behind the Recommendations above):
+
+![VPA Recommendations](../docs/screenshots/cluster-stats-vpa.png)
+
+**Pods**:
+
+![Pods](../docs/screenshots/cluster-stats-pods.png)
 
 ## Design decisions worth knowing about
 
