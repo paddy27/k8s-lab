@@ -38,6 +38,17 @@ systemctl enable ollama
 # Override OLLAMA_MODEL (see the Vagrantfile's `env:` block, same
 # pattern as NODE_IP in common.sh) to pull something else without
 # editing this script.
-ollama pull "${OLLAMA_MODEL:-qwen3:4b}"
+#
+# qwen2.5:3b-instruct, not qwen3:4b - found the hard way, manually,
+# before this script was wired up: qwen3:4b's hybrid thinking mode is
+# not controllable via the documented `"think": false` API parameter on
+# this Ollama version (every response embedded the full reasoning trace
+# regardless), and that reasoning is non-deterministic enough in length
+# to be unusable for an interactive agent - 3 identical one-line prompts
+# produced 330/414/1778 reasoning tokens and 14-124s response times.
+# qwen2.5 predates the hybrid-thinking feature entirely (nothing to
+# fail to disable) and answered the same prompt in a consistent ~10
+# tokens every time.
+ollama pull "${OLLAMA_MODEL:-qwen2.5:3b-instruct}"
 
 echo "Provisioning completed $(date)"
